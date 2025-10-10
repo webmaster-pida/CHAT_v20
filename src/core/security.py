@@ -1,28 +1,53 @@
 # src/core/security.py
-from fastapi import Request, HTTPException, status, Depends
-# Importa el logger desde tu configuración para poder registrar mensajes
-from src.config import log 
 
-# Excepción en caso de que no se envíe el ID del usuario
-credentials_exception = HTTPException(
-    status_code=status.HTTP_401_UNAUTHORIZED,
-    detail="User ID header not provided",
-    headers={"WWW-Authenticate": "Header"},
-)
+import firebase_admin
+from firebase_admin import credentials, auth
+from fastapi import Request, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
 
-async def get_current_user_id_insecure(request: Request) -> str:
+# --- Inicialización de Firebase Admin ---
+# Esto es seguro en Cloud Run, ya que usa las credenciales del entorno.
+try:
+    cred = credentials.ApplicationDefault()
+    firebase_admin.initialize_app(cred)
+except ValueError:
+    # Esto evita que la app crashee si se inicializa múltiples veces (común en desarrollo)
+    pass
+
+# Esta instancia no se usa para validar, solo para que FastAPI muestre el candado en la documentación.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+# --- EL PORTERO ---
+async def get_current_user(request: Request):
     """
-    FUNCIÓN INSEGURA: Obtiene el ID del usuario directamente del encabezado 'X-User-ID'.
-    No realiza ninguna validación. Confía ciegamente en el cliente.
-    NO USAR EN PRODUCCIÓN.
+    Dependencia para verificar el token de Firebase ID enviado en la cabecera Authorization.
+    Devuelve el diccionario con los datos decodificados del usuario.
     """
-    user_id = request.headers.get('X-User-ID')
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Falta la cabecera de autenticación o tiene un formato incorrecto.",
+        )
     
-    # LÍNEA DE DEPURACIÓN: Registra el ID y el origen que recibe el servidor.
-    # Esto nos dirá exactamente qué está llegando desde cada dominio.
-    log.info(f"--- DEBUGGING: Header 'X-User-ID' received: '{user_id}' from origin: {request.headers.get('origin')} ---")
+    token = auth_header.split("Bearer ")[1]
     
-    if user_id is None:
-        raise credentials_exception
-        
-    return str(user_id)
+    try:
+        # Verificar el token usando el SDK de Firebase Admin
+        decoded_token = auth.verify_id_token(token)
+        return decoded_token
+    except auth.ExpiredIdTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="El token ha expirado.",
+        )
+    except auth.InvalidIdTokenError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"El token es inválido: {e}",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error inesperado durante la verificación del token: {e}",
+        )
