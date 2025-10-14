@@ -1,4 +1,4 @@
-# iiresodh-cr/pida-firebase/PIDA-Firebase-fb4ca3500b2d8b2988450193d442b4e96da57a30/src/main.py
+# /src/main.py
 
 import json
 import asyncio
@@ -13,6 +13,10 @@ from src.modules import pse_client, gemini_client, rag_client, firestore_client
 from src.core.prompts import PIDA_SYSTEM_PROMPT
 # Importa el "portero" de seguridad
 from src.core.security import get_current_user
+
+# --- INICIO DE LA MODIFICACIÓN ---
+from google.cloud import firestore
+# --- FIN DE LA MODIFICACIÓN ---
 
 app = FastAPI(
     title="PIDA Backend API",
@@ -34,8 +38,44 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- INICIO DE LA MODIFICACIÓN: FUNCIÓN DE VERIFICACIÓN DE SUSCRIPCIÓN ---
+db = firestore.AsyncClient() # Usamos el cliente asíncrono
+
+async def verify_active_subscription(user_id: str):
+    """
+    Verifica en Firestore si un usuario tiene una suscripción activa o en período de prueba.
+    Lanza una excepción HTTP 403 si no se encuentra ninguna suscripción válida.
+    """
+    try:
+        subscriptions_ref = db.collection("customers").document(user_id).collection("subscriptions")
+        query = subscriptions_ref.where("status", "in", ["active", "trialing"]).limit(1)
+        
+        results = [doc async for doc in query.stream()]
+
+        if not results:
+            raise HTTPException(status_code=403, detail="No tienes una suscripción activa o un período de prueba para usar esta función.")
+        
+        log.info(f"Acceso verificado para el usuario {user_id}. Estado de suscripción: {results[0].to_dict().get('status')}")
+
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        log.error(f"Error al verificar la suscripción para el usuario {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Ocurrió un error al verificar tu estado de suscripción.")
+
+# --- FIN DE LA MODIFICACIÓN ---
+
+
 async def stream_chat_response_generator(chat_request: ChatRequest, country_code: str | None, user: Dict[str, Any], convo_id: str):
     user_id = user['uid']
+    
+    # --- INICIO DE LA MODIFICACIÓN: VERIFICACIÓN DENTRO DEL GENERADOR ---
+    try:
+        await verify_active_subscription(user_id)
+    except HTTPException as e:
+        yield f"data: {json.dumps({'error': e.detail})}\n\n"
+        return
+    # --- FIN DE LA MODIFICACIÓN ---
     
     def create_sse_event(data: dict) -> str:
         return f"data: {json.dumps(data)}\n\n"
@@ -97,16 +137,19 @@ def read_status():
 @app.get("/conversations", response_model=List[Dict[str, Any]], tags=["Chat History"])
 async def get_user_conversations(current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = current_user['uid']
+    await verify_active_subscription(user_id)
     return await firestore_client.get_conversations(user_id)
 
 @app.get("/conversations/{convo_id}/messages", response_model=List[ChatMessage], tags=["Chat History"])
 async def get_conversation_details(convo_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = current_user['uid']
+    await verify_active_subscription(user_id)
     return await firestore_client.get_conversation_messages(user_id, convo_id)
 
 @app.post("/conversations", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED, tags=["Chat History"])
 async def create_new_empty_conversation(request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = current_user['uid']
+    await verify_active_subscription(user_id)
     body = await request.json()
     title = body.get("title", "Nuevo Chat")
     if not title:
@@ -117,6 +160,7 @@ async def create_new_empty_conversation(request: Request, current_user: Dict[str
 @app.delete("/conversations/{convo_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Chat History"])
 async def delete_a_conversation(convo_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     user_id = current_user['uid']
+    await verify_active_subscription(user_id)
     await firestore_client.delete_conversation(user_id, convo_id)
     return
 
@@ -127,6 +171,7 @@ async def update_conversation_title_handler(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     user_id = current_user['uid']
+    await verify_active_subscription(user_id)
     body = await request.json()
     new_title = body.get("title")
     if not new_title:
