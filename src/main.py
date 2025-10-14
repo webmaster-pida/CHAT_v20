@@ -11,7 +11,6 @@ from src.config import settings, log
 from src.models.chat_models import ChatRequest, ChatMessage
 from src.modules import pse_client, gemini_client, rag_client, firestore_client
 from src.core.prompts import PIDA_SYSTEM_PROMPT
-# Importa el "portero" de seguridad
 from src.core.security import get_current_user
 
 # --- INICIO DE LA MODIFICACIÓN ---
@@ -38,14 +37,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- INICIO DE LA MODIFICACIÓN: FUNCIÓN DE VERIFICACIÓN DE SUSCRIPCIÓN ---
-db = firestore.AsyncClient() # Usamos el cliente asíncrono
+# --- INICIO DE LA MODIFICACIÓN: FUNCIÓN DE VERIFICACIÓN DE SUSCRIPCIÓN ACTUALIZADA ---
+db = firestore.AsyncClient()
 
-async def verify_active_subscription(user_id: str):
+async def verify_active_subscription(current_user: Dict[str, Any]):
     """
-    Verifica en Firestore si un usuario tiene una suscripción activa o en período de prueba.
-    Lanza una excepción HTTP 403 si no se encuentra ninguna suscripción válida.
+    Verifica la suscripción de un usuario.
+    Si el email del usuario termina en '@iiresodh.org', se le concede acceso de administrador.
+    Para el resto, verifica en Firestore si tienen una suscripción activa o en período de prueba.
     """
+    user_id = current_user.get("uid")
+    user_email = current_user.get("email", "").lower()
+
+    # Bypass para el equipo interno
+    if user_email.endswith("@iiresodh.org"):
+        log.info(f"Acceso de equipo concedido para el usuario {user_email}.")
+        return
+
+    # Verificación estándar para clientes
     try:
         subscriptions_ref = db.collection("customers").document(user_id).collection("subscriptions")
         query = subscriptions_ref.where("status", "in", ["active", "trialing"]).limit(1)
@@ -55,7 +64,7 @@ async def verify_active_subscription(user_id: str):
         if not results:
             raise HTTPException(status_code=403, detail="No tienes una suscripción activa o un período de prueba para usar esta función.")
         
-        log.info(f"Acceso verificado para el usuario {user_id}. Estado de suscripción: {results[0].to_dict().get('status')}")
+        log.info(f"Acceso de cliente verificado para el usuario {user_id}. Estado: {results[0].to_dict().get('status')}")
 
     except HTTPException as http_exc:
         raise http_exc
@@ -71,7 +80,7 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
     
     # --- INICIO DE LA MODIFICACIÓN: VERIFICACIÓN DENTRO DEL GENERADOR ---
     try:
-        await verify_active_subscription(user_id)
+        await verify_active_subscription(user) # Pasamos el objeto de usuario completo
     except HTTPException as e:
         yield f"data: {json.dumps({'error': e.detail})}\n\n"
         return
@@ -136,32 +145,28 @@ def read_status():
 
 @app.get("/conversations", response_model=List[Dict[str, Any]], tags=["Chat History"])
 async def get_user_conversations(current_user: Dict[str, Any] = Depends(get_current_user)):
-    user_id = current_user['uid']
-    await verify_active_subscription(user_id)
-    return await firestore_client.get_conversations(user_id)
+    await verify_active_subscription(current_user) # Modificado
+    return await firestore_client.get_conversations(current_user['uid'])
 
 @app.get("/conversations/{convo_id}/messages", response_model=List[ChatMessage], tags=["Chat History"])
 async def get_conversation_details(convo_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    user_id = current_user['uid']
-    await verify_active_subscription(user_id)
-    return await firestore_client.get_conversation_messages(user_id, convo_id)
+    await verify_active_subscription(current_user) # Modificado
+    return await firestore_client.get_conversation_messages(current_user['uid'], convo_id)
 
 @app.post("/conversations", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED, tags=["Chat History"])
 async def create_new_empty_conversation(request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
-    user_id = current_user['uid']
-    await verify_active_subscription(user_id)
+    await verify_active_subscription(current_user) # Modificado
     body = await request.json()
     title = body.get("title", "Nuevo Chat")
     if not title:
         raise HTTPException(status_code=400, detail="El título no puede estar vacío")
-    new_convo = await firestore_client.create_new_conversation(user_id, title)
+    new_convo = await firestore_client.create_new_conversation(current_user['uid'], title)
     return new_convo
 
 @app.delete("/conversations/{convo_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Chat History"])
 async def delete_a_conversation(convo_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    user_id = current_user['uid']
-    await verify_active_subscription(user_id)
-    await firestore_client.delete_conversation(user_id, convo_id)
+    await verify_active_subscription(current_user) # Modificado
+    await firestore_client.delete_conversation(current_user['uid'], convo_id)
     return
 
 @app.patch("/conversations/{convo_id}/title", status_code=status.HTTP_204_NO_CONTENT, tags=["Chat History"])
@@ -170,13 +175,12 @@ async def update_conversation_title_handler(
     request: Request,
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    user_id = current_user['uid']
-    await verify_active_subscription(user_id)
+    await verify_active_subscription(current_user) # Modificado
     body = await request.json()
     new_title = body.get("title")
     if not new_title:
         raise HTTPException(status_code=400, detail="El título no puede estar vacío")
-    await firestore_client.update_conversation_title(user_id, convo_id, new_title)
+    await firestore_client.update_conversation_title(current_user['uid'], convo_id, new_title)
     return
 
 @app.post("/chat-stream/{convo_id}", tags=["Chat"])
