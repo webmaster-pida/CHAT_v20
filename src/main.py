@@ -50,7 +50,7 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
     user_email = current_user.get("email", "").lower()
 
     # Bypass para el equipo interno
-    if user_email.endswith("@iiresodh.org"):
+    if user_email.endswith("@iiresodh.org") or user_email.endswith("@urquilla.com"):
         log.info(f"Acceso de equipo concedido para el usuario {user_email}.")
         return
 
