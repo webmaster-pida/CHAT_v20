@@ -9,13 +9,12 @@ from typing import List, Dict, Any
 
 from src.config import settings, log
 from src.models.chat_models import ChatRequest, ChatMessage
-from src.modules import pse_client, gemini_client, rag_client, firestore_client
+# SE ELIMINA pse_client de la importación
+from src.modules import gemini_client, rag_client, firestore_client
 from src.core.prompts import PIDA_SYSTEM_PROMPT
 from src.core.security import get_current_user
 
-# --- INICIO DE LA MODIFICACIÓN ---
 from google.cloud import firestore
-# --- FIN DE LA MODIFICACIÓN ---
 
 app = FastAPI(
     title="PIDA Backend API",
@@ -37,14 +36,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- INICIO DE LA MODIFICACIÓN: FUNCIÓN DE VERIFICACIÓN DE SUSCRIPCIÓN ACTUALIZADA ---
 db = firestore.AsyncClient()
 
 async def verify_active_subscription(current_user: Dict[str, Any]):
     """
     Verifica la suscripción de un usuario.
-    Si el email del usuario termina en '@iiresodh.org', se le concede acceso de administrador.
-    Para el resto, verifica en Firestore si tienen una suscripción activa o en período de prueba.
     """
     user_id = current_user.get("uid")
     user_email = current_user.get("email", "").lower()
@@ -72,19 +68,15 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
         log.error(f"Error al verificar la suscripción para el usuario {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Ocurrió un error al verificar tu estado de suscripción.")
 
-# --- FIN DE LA MODIFICACIÓN ---
-
 
 async def stream_chat_response_generator(chat_request: ChatRequest, country_code: str | None, user: Dict[str, Any], convo_id: str):
     user_id = user['uid']
     
-    # --- INICIO DE LA MODIFICACIÓN: VERIFICACIÓN DENTRO DEL GENERADOR ---
     try:
-        await verify_active_subscription(user) # Pasamos el objeto de usuario completo
+        await verify_active_subscription(user)
     except HTTPException as e:
         yield f"data: {json.dumps({'error': e.detail})}\n\n"
         return
-    # --- FIN DE LA MODIFICACIÓN ---
     
     def create_sse_event(data: dict) -> str:
         return f"data: {json.dumps(data)}\n\n"
@@ -98,24 +90,13 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         history_from_db = await firestore_client.get_conversation_messages(user_id, convo_id)
         history_for_gemini = gemini_client.prepare_history_for_vertex(history_from_db[:-1])
         
-        yield create_sse_event({"event": "status", "message": "Consultando jurisprudencia y fuentes externas..."})
-        search_tasks = [
-            pse_client.search_for_sources(chat_request.prompt, num_results=3),
-            rag_client.search_internal_documents(chat_request.prompt)
-        ]
-        combined_context = ""
-        task_count = len(search_tasks)
-        for i, task in enumerate(asyncio.as_completed(search_tasks)):
-            result = await task
-            combined_context += result
-            yield create_sse_event({"event": "status", "message": f"Fuente de contexto ({i+1}/{task_count}) procesada..."})
+        # Se elimina la lógica de búsqueda manual (PSE y RAG) para confiar en el Grounding nativo y el prompt directo.
+        yield create_sse_event({"event": "status", "message": "Analizando consulta y contexto geográfico..."})
         
-        await asyncio.sleep(0.5)
-        yield create_sse_event({"event": "status", "message": "Contexto recopilado. Construyendo la consulta..."})
+        # Construcción simplificada del prompt final
+        final_prompt = f"Contexto geográfico: {country_code}\n\nPregunta del usuario: {chat_request.prompt}"
         
-        final_prompt = f"Contexto geográfico: {country_code}\n{combined_context}\n\n---\n\nPregunta del usuario: {chat_request.prompt}"
-        
-        yield create_sse_event({"event": "status", "message": f"Enviando a {settings.GEMINI_MODEL} para análisis... 🧠"})
+        yield create_sse_event({"event": "status", "message": f"Enviando a {settings.GEMINI_MODEL} con búsqueda conectada... 🧠"})
         
         full_response_text = ""
         async for chunk in gemini_client.generate_streaming_response(
@@ -145,17 +126,17 @@ def read_status():
 
 @app.get("/conversations", response_model=List[Dict[str, Any]], tags=["Chat History"])
 async def get_user_conversations(current_user: Dict[str, Any] = Depends(get_current_user)):
-    await verify_active_subscription(current_user) # Modificado
+    await verify_active_subscription(current_user)
     return await firestore_client.get_conversations(current_user['uid'])
 
 @app.get("/conversations/{convo_id}/messages", response_model=List[ChatMessage], tags=["Chat History"])
 async def get_conversation_details(convo_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    await verify_active_subscription(current_user) # Modificado
+    await verify_active_subscription(current_user)
     return await firestore_client.get_conversation_messages(current_user['uid'], convo_id)
 
 @app.post("/conversations", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED, tags=["Chat History"])
 async def create_new_empty_conversation(request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
-    await verify_active_subscription(current_user) # Modificado
+    await verify_active_subscription(current_user)
     body = await request.json()
     title = body.get("title", "Nuevo Chat")
     if not title:
@@ -165,7 +146,7 @@ async def create_new_empty_conversation(request: Request, current_user: Dict[str
 
 @app.delete("/conversations/{convo_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Chat History"])
 async def delete_a_conversation(convo_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    await verify_active_subscription(current_user) # Modificado
+    await verify_active_subscription(current_user)
     await firestore_client.delete_conversation(current_user['uid'], convo_id)
     return
 
@@ -175,7 +156,7 @@ async def update_conversation_title_handler(
     request: Request,
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    await verify_active_subscription(current_user) # Modificado
+    await verify_active_subscription(current_user)
     body = await request.json()
     new_title = body.get("title")
     if not new_title:
