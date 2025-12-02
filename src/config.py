@@ -18,10 +18,15 @@ class Settings(BaseSettings):
     PSE_API_KEY: str
     PSE_ID: str
 
-    # --- VARIABLES AÑADIDAS QUE FALTABAN ---
+    # --- Variables Modelo ---
     MAX_OUTPUT_TOKENS: int = 16384
     TEMPERATURE: float = 0.7
     TOP_P: float = 0.95
 
+    # --- NUEVAS VARIABLES DE CONTROL DE ACCESO (Formato JSON String) ---
+    # Valores por defecto actuales para evitar caídas si no se configuran las ENV vars
+    ALLOWED_ORIGINS: str = '["https://pida.iiresodh.org", "https://pida-ai.com", "http://localhost", "http://localhost:8080"]'
+    ADMIN_DOMAINS: str = '["iiresodh.org", "urquilla.com"]'
+    ADMIN_EMAILS: str = '[]'
 
 settings = Settings()
