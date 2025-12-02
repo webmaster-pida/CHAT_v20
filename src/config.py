@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str
     PSE_API_KEY: str
     PSE_ID: str
+    RAG_API_URL: str
 
     # --- Variables Modelo ---
     MAX_OUTPUT_TOKENS: int = 16384
