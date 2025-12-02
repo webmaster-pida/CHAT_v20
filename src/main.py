@@ -22,12 +22,13 @@ app = FastAPI(
     description="API para el asistente jurídico PIDA, con persistencia en BD y autenticación."
 )
 
-origins = [
-    "https://pida.iiresodh.org",
-    "https://pida-ai.com",
-    "http://localhost",
-    "http://localhost:8080",
-]
+# --- MODIFICACIÓN: Orígenes dinámicos desde config ---
+try:
+    origins = json.loads(settings.ALLOWED_ORIGINS)
+except json.JSONDecodeError:
+    log.error("Error al decodificar ALLOWED_ORIGINS. Usando fallback.")
+    origins = ["https://pida.iiresodh.org", "https://pida-ai.com"]
+# -----------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,16 +44,27 @@ db = firestore.AsyncClient()
 async def verify_active_subscription(current_user: Dict[str, Any]):
     """
     Verifica la suscripción de un usuario.
-    Si el email del usuario termina en '@iiresodh.org', se le concede acceso de administrador.
-    Para el resto, verifica en Firestore si tienen una suscripción activa o en período de prueba.
+    Comprueba listas de acceso (dominios y emails) definidas en variables de entorno.
     """
     user_id = current_user.get("uid")
     user_email = current_user.get("email", "").lower()
 
-    # Bypass para el equipo interno
-    if user_email.endswith("@iiresodh.org") or user_email.endswith("@urquilla.com"):
+    # --- LOGICA DE ACCESO DINÁMICA ---
+    try:
+        admin_domains = json.loads(settings.ADMIN_DOMAINS)
+        admin_emails = json.loads(settings.ADMIN_EMAILS)
+    except json.JSONDecodeError:
+        log.error("Error decodificando listas de administración. Usando valores seguros.")
+        admin_domains = []
+        admin_emails = []
+
+    email_domain = user_email.split("@")[-1] if "@" in user_email else ""
+
+    # 1. Bypass para el equipo interno (Dominios o Emails específicos)
+    if (email_domain in admin_domains) or (user_email in admin_emails):
         log.info(f"Acceso de equipo concedido para el usuario {user_email}.")
         return
+    # ---------------------------------
 
     # Verificación estándar para clientes
     try:
