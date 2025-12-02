@@ -1,4 +1,5 @@
 # src/config.py
+
 import logging
 import google.cloud.logging
 from pydantic_settings import BaseSettings, SettingsConfigDict
