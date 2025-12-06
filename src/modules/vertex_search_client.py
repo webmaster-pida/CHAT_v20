@@ -4,26 +4,23 @@ from google.api_core.client_options import ClientOptions
 from google.cloud import discoveryengine_v1 as discoveryengine
 from src.config import settings, log
 
-# Configuración fija de tu proyecto
-PROJECT_ID = "pida-ai-v20"  # Tu proyecto
-LOCATION = "global"         # La ubicación que elegiste (o us-central1)
-DATA_STORE_ID = "almacen-web-pida_1765039607916" # El ID de la imagen
+# TUS DATOS (Confirmados)
+PROJECT_ID = "pida-ai-v20"
+LOCATION = "global"
+DATA_STORE_ID = "almacen-web-pida_1765039607916"
 
-def search_legal_docs(query: str, num_results: int = 5):
+# --- CORRECCIÓN AQUÍ: La función se debe llamar 'search' ---
+def search(query: str, num_results: int = 5) -> str:
     """
-    Realiza una búsqueda semántica en Vertex AI Search (sitios jurídicos).
-    Retorna una lista de diccionarios con título, enlace y fragmento.
+    Busca en Vertex AI Search y devuelve un STRING formateado.
     """
     try:
-        # 1. Configurar cliente
         client_options = (
             ClientOptions(api_endpoint=f"{LOCATION}-discoveryengine.googleapis.com")
             if LOCATION != "global" else None
         )
-        
         client = discoveryengine.SearchServiceClient(client_options=client_options)
 
-        # 2. Definir dónde buscar (Serving Config)
         serving_config = client.serving_config_path(
             project=PROJECT_ID,
             location=LOCATION,
@@ -31,8 +28,6 @@ def search_legal_docs(query: str, num_results: int = 5):
             serving_config="default_config",
         )
 
-        # 3. Preparar la solicitud
-        # content_search_spec: Pide resúmenes extractivos (snippets)
         request = discoveryengine.SearchRequest(
             serving_config=serving_config,
             query=query,
@@ -44,39 +39,34 @@ def search_legal_docs(query: str, num_results: int = 5):
             ),
         )
 
-        # 4. Ejecutar búsqueda
         response = client.search(request)
+        
+        if not response.results:
+            log.warning(f"Vertex Search no encontró resultados para: {query}")
+            return ""
 
-        # 5. Procesar resultados para que se parezcan a lo que usaba tu RAG
-        results = []
+        # Formatear resultados como texto para el LLM
+        formatted_output = "\n\n### Información Jurídica Externa (Web):\n"
+        
         for result in response.results:
             data = result.document.derived_struct_data
             
-            # Intentamos obtener el mejor fragmento de texto posible
+            # Extraer snippet
             snippet = ""
             if "snippets" in data and len(data["snippets"]) > 0:
                 snippet = data["snippets"][0].get("snippet", "")
-            
-            # Si no hay snippet, usamos la descripción o parte del contenido
             if not snippet:
                 snippet = data.get("pagemap", {}).get("metatags", [{}])[0].get("og:description", "")
 
-            results.append({
-                "title": data.get("title", "Sin título"),
-                "link": data.get("link", ""),
-                "snippet": snippet,
-                "source": "Vertex AI Legal Web"
-            })
+            title = data.get("title", "Documento Legal")
+            link = data.get("link", "#")
 
-        log.info(f"Vertex Search encontró {len(results)} documentos para: '{query}'")
-        return results
+            formatted_output += f"- **Fuente:** [{title}]({link})\n"
+            formatted_output += f"  > {snippet}\n\n"
+
+        log.info(f"Vertex Search retornó {len(response.results)} docs.")
+        return formatted_output
 
     except Exception as e:
-        log.error(f"Error buscando en Vertex AI: {e}")
-        return []
-
-# Prueba rápida si ejecutas este archivo directo
-if __name__ == "__main__":
-    test_results = search_legal_docs("derechos laborales costa rica")
-    for r in test_results:
-        print(f"- {r['title']} ({r['link']})")
+        log.error(f"Error crítico en Vertex Search: {e}")
+        return ""
