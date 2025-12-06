@@ -9,26 +9,29 @@ from typing import List, Dict, Any
 
 from src.config import settings, log
 from src.models.chat_models import ChatRequest, ChatMessage
-from src.modules import pse_client, gemini_client, rag_client, firestore_client
+# CORRECCIÓN 1: Importamos vertex_search_client y quitamos pse_client
+from src.modules import vertex_search_client, gemini_client, rag_client, firestore_client
 from src.core.prompts import PIDA_SYSTEM_PROMPT
 from src.core.security import get_current_user
 
-# --- INICIO DE LA MODIFICACIÓN ---
 from google.cloud import firestore
-# --- FIN DE LA MODIFICACIÓN ---
 
 app = FastAPI(
     title="PIDA Backend API",
     description="API para el asistente jurídico PIDA, con persistencia en BD y autenticación."
 )
 
-# --- MODIFICACIÓN: Orígenes dinámicos desde config ---
+# --- CONFIGURACIÓN CORS ---
 try:
-    origins = json.loads(settings.ALLOWED_ORIGINS)
-except json.JSONDecodeError:
-    log.error("Error al decodificar ALLOWED_ORIGINS. Usando fallback.")
-    origins = ["https://pida.iiresodh.org", "https://pida-ai.com"]
-# -----------------------------------------------------
+    # Intentamos cargar como JSON, si falla usamos fallback seguro
+    raw_origins = settings.ALLOWED_ORIGINS
+    if isinstance(raw_origins, list):
+        origins = raw_origins
+    else:
+        origins = json.loads(str(raw_origins))
+except Exception:
+    log.error("Error al procesar ALLOWED_ORIGINS. Usando fallback.")
+    origins = ["https://pida.iiresodh.org", "https://pida-ai.com", "https://pida-ai-v20.web.app"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -38,35 +41,56 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- INICIO DE LA MODIFICACIÓN: FUNCIÓN DE VERIFICACIÓN DE SUSCRIPCIÓN ACTUALIZADA ---
+# --- CLIENTE FIRESTORE ASÍNCRONO ---
 db = firestore.AsyncClient()
 
+# --- FUNCIÓN DE VERIFICACIÓN DE SUSCRIPCIÓN (CORREGIDA Y BLINDADA) ---
 async def verify_active_subscription(current_user: Dict[str, Any]):
     """
     Verifica la suscripción de un usuario.
-    Comprueba listas de acceso (dominios y emails) definidas en variables de entorno.
+    Incluye la lógica robusta para leer variables de entorno (Listas vs Strings).
     """
     user_id = current_user.get("uid")
-    user_email = current_user.get("email", "").lower()
+    user_email = current_user.get("email", "").strip().lower()
 
-    # --- LOGICA DE ACCESO DINÁMICA ---
+    # --- LÓGICA ROBUSTA PARA LEER VARIABLES (Igual que en security.py) ---
     try:
-        admin_domains = json.loads(settings.ADMIN_DOMAINS)
-        admin_emails = json.loads(settings.ADMIN_EMAILS)
-    except json.JSONDecodeError:
-        log.error("Error decodificando listas de administración. Usando valores seguros.")
+        # Dominios
+        raw_domains = settings.ADMIN_DOMAINS
+        if isinstance(raw_domains, list):
+            admin_domains = raw_domains
+        elif isinstance(raw_domains, str) and raw_domains.strip():
+            admin_domains = json.loads(raw_domains)
+        else:
+            admin_domains = []
+        # Limpieza
+        admin_domains = [str(d).strip().lower() for d in admin_domains]
+
+        # Emails
+        raw_emails = settings.ADMIN_EMAILS
+        if isinstance(raw_emails, list):
+            admin_emails = raw_emails
+        elif isinstance(raw_emails, str) and raw_emails.strip():
+            admin_emails = json.loads(raw_emails)
+        else:
+            admin_emails = []
+        # Limpieza
+        admin_emails = [str(e).strip().lower() for e in admin_emails]
+
+    except Exception as e:
+        log.error(f"Error procesando listas de administración en main.py: {e}")
         admin_domains = []
         admin_emails = []
 
     email_domain = user_email.split("@")[-1] if "@" in user_email else ""
 
-    # 1. Bypass para el equipo interno (Dominios o Emails específicos)
+    # 1. Bypass para el equipo interno
     if (email_domain in admin_domains) or (user_email in admin_emails):
-        log.info(f"Acceso de equipo concedido para el usuario {user_email}.")
+        log.info(f"Acceso VIP concedido en Chat: {user_email}")
         return
     # ---------------------------------
 
-    # Verificación estándar para clientes
+    # 2. Verificación estándar para clientes en Firestore
     try:
         subscriptions_ref = db.collection("customers").document(user_id).collection("subscriptions")
         query = subscriptions_ref.where("status", "in", ["active", "trialing"]).limit(1)
@@ -74,61 +98,69 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
         results = [doc async for doc in query.stream()]
 
         if not results:
-            raise HTTPException(status_code=403, detail="No tienes una suscripción activa o un período de prueba para usar esta función.")
+            raise HTTPException(status_code=403, detail="No tienes una suscripción activa.")
         
-        log.info(f"Acceso de cliente verificado para el usuario {user_id}. Estado: {results[0].to_dict().get('status')}")
+        # log.info(f"Suscripción verificada para: {user_id}")
 
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
-        log.error(f"Error al verificar la suscripción para el usuario {user_id}: {e}")
-        raise HTTPException(status_code=500, detail="Ocurrió un error al verificar tu estado de suscripción.")
-
-# --- FIN DE LA MODIFICACIÓN ---
+        log.error(f"Error verificando suscripción DB: {e}")
+        raise HTTPException(status_code=500, detail="Error interno verificando suscripción.")
 
 
+# --- GENERADOR DE RESPUESTA STREAMING ---
 async def stream_chat_response_generator(chat_request: ChatRequest, country_code: str | None, user: Dict[str, Any], convo_id: str):
     user_id = user['uid']
     
-    # --- INICIO DE LA MODIFICACIÓN: VERIFICACIÓN DENTRO DEL GENERADOR ---
+    # 1. Verificar Permisos
     try:
-        await verify_active_subscription(user) # Pasamos el objeto de usuario completo
+        await verify_active_subscription(user) 
     except HTTPException as e:
         yield f"data: {json.dumps({'error': e.detail})}\n\n"
         return
-    # --- FIN DE LA MODIFICACIÓN ---
     
     def create_sse_event(data: dict) -> str:
         return f"data: {json.dumps(data)}\n\n"
 
     try:
+        # 2. Guardar mensaje del usuario
         user_message = ChatMessage(role="user", content=chat_request.prompt)
         await firestore_client.add_message_to_conversation(user_id, convo_id, user_message)
-        yield create_sse_event({"event": "status", "message": "Iniciando... 🕵️"})
-        await asyncio.sleep(0.5)
         
+        yield create_sse_event({"event": "status", "message": "Iniciando... 🕵️"})
+        await asyncio.sleep(0.1) # Pequeña pausa para UI
+        
+        # 3. Preparar Historial
         history_from_db = await firestore_client.get_conversation_messages(user_id, convo_id)
         history_for_gemini = gemini_client.prepare_history_for_vertex(history_from_db[:-1])
         
-        yield create_sse_event({"event": "status", "message": "Consultando jurisprudencia y fuentes externas..."})
+        # 4. BÚSQUEDA PARALELA (Vertex AI + RAG Interno)
+        yield create_sse_event({"event": "status", "message": "Consultando jurisprudencia (Vertex AI) y documentos internos..."})
+        
+        # CORRECCIÓN 2: Usamos vertex_search_client envuelto en to_thread porque es síncrono
         search_tasks = [
-            pse_client.search_for_sources(chat_request.prompt, num_results=3),
+            asyncio.to_thread(vertex_search_client.search, chat_request.prompt, num_results=3),
             rag_client.search_internal_documents(chat_request.prompt)
         ]
+        
         combined_context = ""
         task_count = len(search_tasks)
+        
+        # Ejecutamos las búsquedas en paralelo
         for i, task in enumerate(asyncio.as_completed(search_tasks)):
             result = await task
             combined_context += result
-            yield create_sse_event({"event": "status", "message": f"Fuente de contexto ({i+1}/{task_count}) procesada..."})
+            yield create_sse_event({"event": "status", "message": f"Fuente {i+1} procesada..."})
         
-        await asyncio.sleep(0.5)
-        yield create_sse_event({"event": "status", "message": "Contexto recopilado. Construyendo la consulta..."})
+        yield create_sse_event({"event": "status", "message": "Analizando información..."})
         
+        # 5. Construir Prompt Final
         final_prompt = f"Contexto geográfico: {country_code}\n{combined_context}\n\n---\n\nPregunta del usuario: {chat_request.prompt}"
         
-        yield create_sse_event({"event": "status", "message": f"Enviando a {settings.GEMINI_MODEL} para análisis... 🧠"})
+        yield create_sse_event({"event": "status", "message": f"Generando respuesta... 🧠"})
         
+        # 6. Generar respuesta con Gemini
         full_response_text = ""
         async for chunk in gemini_client.generate_streaming_response(
             system_prompt=PIDA_SYSTEM_PROMPT,
@@ -138,36 +170,38 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
             yield create_sse_event({'text': chunk})
             full_response_text += chunk
 
+        # 7. Guardar respuesta del modelo
         if full_response_text:
             model_message = ChatMessage(role="model", content=full_response_text)
             await firestore_client.add_message_to_conversation(user_id, convo_id, model_message)
 
-        log.info(f"Streaming finalizado para convo {convo_id}. Enviando evento 'done'.")
         yield create_sse_event({'event': 'done'})
 
     except Exception as e:
-        log.error(f"Error crítico durante el streaming para convo {convo_id}: {e}", exc_info=True)
-        error_message = json.dumps({"error": "Lo siento, ocurrió un error interno al generar la respuesta."})
+        log.error(f"Error crítico streaming convo {convo_id}: {e}", exc_info=True)
+        error_message = json.dumps({"error": "Ocurrió un error interno al generar la respuesta."})
         yield f"data: {error_message}\n\n"
 
 
+# --- ENDPOINTS ---
+
 @app.get("/status", tags=["Status"])
 def read_status():
-    return {"status": "ok", "message": "PIDA Backend de Lógica funcionando."}
+    return {"status": "ok", "message": "PIDA Backend v2.0 (Vertex AI) Online."}
 
 @app.get("/conversations", response_model=List[Dict[str, Any]], tags=["Chat History"])
 async def get_user_conversations(current_user: Dict[str, Any] = Depends(get_current_user)):
-    await verify_active_subscription(current_user) # Modificado
+    await verify_active_subscription(current_user)
     return await firestore_client.get_conversations(current_user['uid'])
 
 @app.get("/conversations/{convo_id}/messages", response_model=List[ChatMessage], tags=["Chat History"])
 async def get_conversation_details(convo_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    await verify_active_subscription(current_user) # Modificado
+    await verify_active_subscription(current_user)
     return await firestore_client.get_conversation_messages(current_user['uid'], convo_id)
 
 @app.post("/conversations", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED, tags=["Chat History"])
 async def create_new_empty_conversation(request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
-    await verify_active_subscription(current_user) # Modificado
+    await verify_active_subscription(current_user)
     body = await request.json()
     title = body.get("title", "Nuevo Chat")
     if not title:
@@ -177,7 +211,7 @@ async def create_new_empty_conversation(request: Request, current_user: Dict[str
 
 @app.delete("/conversations/{convo_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Chat History"])
 async def delete_a_conversation(convo_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    await verify_active_subscription(current_user) # Modificado
+    await verify_active_subscription(current_user)
     await firestore_client.delete_conversation(current_user['uid'], convo_id)
     return
 
@@ -187,7 +221,7 @@ async def update_conversation_title_handler(
     request: Request,
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    await verify_active_subscription(current_user) # Modificado
+    await verify_active_subscription(current_user)
     body = await request.json()
     new_title = body.get("title")
     if not new_title:
