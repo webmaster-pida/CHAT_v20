@@ -1,7 +1,7 @@
 # src/modules/gemini_client.py
 
 import vertexai
-import asyncio # <--- IMPORTANTE: Asegúrate de que asyncio está importado
+import asyncio 
 from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig
 from typing import List, AsyncGenerator
 from src.config import settings, log
@@ -36,8 +36,8 @@ def prepare_history_for_vertex(history: List[ChatMessage]) -> List[Content]:
 
 async def generate_streaming_response(system_prompt: str, prompt: str, history: List[Content]) -> AsyncGenerator[str, None]:
     """
-    Genera una respuesta del modelo Gemini en modo streaming, asegurando que no se
-    bloquee el event loop de asyncio.
+    Genera una respuesta del modelo Gemini en modo streaming ASÍNCRONO REAL.
+    Usa send_message_async para no bloquear el event loop.
     """
     if not model:
         log.error("El modelo Gemini no está disponible.")
@@ -45,19 +45,21 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
         return
 
     try:
+        # Iniciamos el chat (la sesión es local, no requiere await)
         chat = model.start_chat(history=history)
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
-        response_stream = chat.send_message(full_prompt, stream=True, generation_config=generation_config)
+        # --- SOLUCIÓN: Usar el método async nativo ---
+        response_stream = await chat.send_message_async(
+            full_prompt, 
+            stream=True, 
+            generation_config=generation_config
+        )
 
-        # Iteramos sobre el generador síncrono
-        for chunk in response_stream:
+        # Iteramos sobre el generador asíncrono
+        async for chunk in response_stream:
             if chunk.text:
                 yield chunk.text
-                # --- LA LÍNEA CLAVE DE LA SOLUCIÓN ---
-                # Cedemos el control al event loop para que pueda enviar el chunk
-                # antes de procesar el siguiente.
-                await asyncio.sleep(0)
 
     except Exception as e:
         log.error(f"Error al generar la respuesta en streaming desde Gemini: {e}", exc_info=True)
