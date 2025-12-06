@@ -4,27 +4,26 @@ from google.api_core.client_options import ClientOptions
 from google.cloud import discoveryengine_v1 as discoveryengine
 from src.config import settings, log
 
-# TUS DATOS (Confirmados)
-PROJECT_ID = "pida-ai-v20"
-LOCATION = "global"
-DATA_STORE_ID = "almacen-web-pida_1765039607916"
-
-# --- CORRECCIÓN AQUÍ: La función se debe llamar 'search' ---
 def search(query: str, num_results: int = 5) -> str:
     """
     Busca en Vertex AI Search y devuelve un STRING formateado.
+    Usa configuración segura desde src.config.
     """
     try:
+        project_id = settings.VERTEX_SEARCH_PROJECT_ID
+        location = settings.VERTEX_SEARCH_LOCATION
+        data_store_id = settings.VERTEX_SEARCH_DATA_STORE_ID
+
         client_options = (
-            ClientOptions(api_endpoint=f"{LOCATION}-discoveryengine.googleapis.com")
-            if LOCATION != "global" else None
+            ClientOptions(api_endpoint=f"{location}-discoveryengine.googleapis.com")
+            if location != "global" else None
         )
         client = discoveryengine.SearchServiceClient(client_options=client_options)
 
         serving_config = client.serving_config_path(
-            project=PROJECT_ID,
-            location=LOCATION,
-            data_store=DATA_STORE_ID,
+            project=project_id,
+            location=location,
+            data_store=data_store_id,
             serving_config="default_config",
         )
 
