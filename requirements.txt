@@ -13,3 +13,4 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 PyJWT==2.8.0
 firebase-admin==6.5.0
+google-cloud-discoveryengine
