@@ -9,7 +9,7 @@ from typing import List, Dict, Any
 
 from src.config import settings, log
 from src.models.chat_models import ChatRequest, ChatMessage
-# CORRECCIÓN 1: Importamos vertex_search_client y quitamos pse_client
+# CORRECCIÓN: Imports limpios
 from src.modules import vertex_search_client, gemini_client, rag_client, firestore_client
 from src.core.prompts import PIDA_SYSTEM_PROMPT
 from src.core.security import get_current_user
@@ -22,16 +22,8 @@ app = FastAPI(
 )
 
 # --- CONFIGURACIÓN CORS ---
-try:
-    # Intentamos cargar como JSON, si falla usamos fallback seguro
-    raw_origins = settings.ALLOWED_ORIGINS
-    if isinstance(raw_origins, list):
-        origins = raw_origins
-    else:
-        origins = json.loads(str(raw_origins))
-except Exception:
-    log.error("Error al procesar ALLOWED_ORIGINS. Usando fallback.")
-    origins = ["https://pida.iiresodh.org", "https://pida-ai.com", "https://pida-ai-v20.web.app"]
+# Usamos la lista ya procesada y validada en config.py
+origins = settings.ALLOWED_ORIGINS
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,43 +36,18 @@ app.add_middleware(
 # --- CLIENTE FIRESTORE ASÍNCRONO ---
 db = firestore.AsyncClient()
 
-# --- FUNCIÓN DE VERIFICACIÓN DE SUSCRIPCIÓN (CORREGIDA Y BLINDADA) ---
+# --- FUNCIÓN DE VERIFICACIÓN DE SUSCRIPCIÓN ---
 async def verify_active_subscription(current_user: Dict[str, Any]):
     """
     Verifica la suscripción de un usuario.
-    Incluye la lógica robusta para leer variables de entorno (Listas vs Strings).
+    Usa las listas optimizadas de settings.
     """
     user_id = current_user.get("uid")
     user_email = current_user.get("email", "").strip().lower()
-
-    # --- LÓGICA ROBUSTA PARA LEER VARIABLES (Igual que en security.py) ---
-    try:
-        # Dominios
-        raw_domains = settings.ADMIN_DOMAINS
-        if isinstance(raw_domains, list):
-            admin_domains = raw_domains
-        elif isinstance(raw_domains, str) and raw_domains.strip():
-            admin_domains = json.loads(raw_domains)
-        else:
-            admin_domains = []
-        # Limpieza
-        admin_domains = [str(d).strip().lower() for d in admin_domains]
-
-        # Emails
-        raw_emails = settings.ADMIN_EMAILS
-        if isinstance(raw_emails, list):
-            admin_emails = raw_emails
-        elif isinstance(raw_emails, str) and raw_emails.strip():
-            admin_emails = json.loads(raw_emails)
-        else:
-            admin_emails = []
-        # Limpieza
-        admin_emails = [str(e).strip().lower() for e in admin_emails]
-
-    except Exception as e:
-        log.error(f"Error procesando listas de administración en main.py: {e}")
-        admin_domains = []
-        admin_emails = []
+    
+    # Listas limpias desde configuración
+    admin_domains = settings.ADMIN_DOMAINS
+    admin_emails = settings.ADMIN_EMAILS
 
     email_domain = user_email.split("@")[-1] if "@" in user_email else ""
 
@@ -95,12 +62,11 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
         subscriptions_ref = db.collection("customers").document(user_id).collection("subscriptions")
         query = subscriptions_ref.where("status", "in", ["active", "trialing"]).limit(1)
         
+        # Consumimos el stream asíncrono
         results = [doc async for doc in query.stream()]
 
         if not results:
             raise HTTPException(status_code=403, detail="No tienes una suscripción activa.")
-        
-        # log.info(f"Suscripción verificada para: {user_id}")
 
     except HTTPException as http_exc:
         raise http_exc
@@ -129,7 +95,7 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         await firestore_client.add_message_to_conversation(user_id, convo_id, user_message)
         
         yield create_sse_event({"event": "status", "message": "Iniciando... 🕵️"})
-        await asyncio.sleep(0.1) # Pequeña pausa para UI
+        await asyncio.sleep(0.1) 
         
         # 3. Preparar Historial
         history_from_db = await firestore_client.get_conversation_messages(user_id, convo_id)
@@ -138,16 +104,13 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         # 4. BÚSQUEDA PARALELA (Vertex AI + RAG Interno)
         yield create_sse_event({"event": "status", "message": "Consultando jurisprudencia (Vertex AI) y documentos internos..."})
         
-        # CORRECCIÓN 2: Usamos vertex_search_client envuelto en to_thread porque es síncrono
         search_tasks = [
             asyncio.to_thread(vertex_search_client.search, chat_request.prompt, num_results=3),
             rag_client.search_internal_documents(chat_request.prompt)
         ]
         
         combined_context = ""
-        task_count = len(search_tasks)
         
-        # Ejecutamos las búsquedas en paralelo
         for i, task in enumerate(asyncio.as_completed(search_tasks)):
             result = await task
             combined_context += result
@@ -160,7 +123,7 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         
         yield create_sse_event({"event": "status", "message": f"Generando respuesta... 🧠"})
         
-        # 6. Generar respuesta con Gemini
+        # 6. Generar respuesta con Gemini (AHORA ASÍNCRONO REAL)
         full_response_text = ""
         async for chunk in gemini_client.generate_streaming_response(
             system_prompt=PIDA_SYSTEM_PROMPT,
