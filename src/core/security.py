@@ -1,4 +1,3 @@
-# src/core/security.py
 import json
 import firebase_admin
 from firebase_admin import credentials, auth
@@ -10,6 +9,9 @@ from src.config import settings, log
 # Esto es seguro en Cloud Run, ya que usa las credenciales del entorno.
 try:
     cred = credentials.ApplicationDefault()
+    # Inicializamos sin argumentos extra, asumiendo que el entorno de Cloud Run
+    # provee la identidad correcta. Si hubiera problemas de proyecto cruzado,
+    # se podría agregar {'projectId': 'TU_PROJECT_ID'} aquí.
     firebase_admin.initialize_app(cred)
 except ValueError:
     # Esto evita que la app crashee si se inicializa múltiples veces (común en desarrollo)
@@ -41,15 +43,36 @@ async def get_current_user(request: Request):
         email = decoded_token.get("email", "").lower()
         domain = email.split("@")[1] if "@" in email else ""
         
-        # 3. Cargar reglas de acceso desde la configuración (Variables de Entorno)
+        # 3. Cargar reglas de acceso desde la configuración (LÓGICA ROBUSTA)
         try:
-            # settings.ADMIN_DOMAINS viene como string JSON '["dominio.com"]' -> lo convertimos a lista
-            allowed_domains = json.loads(settings.ADMIN_DOMAINS)
-            # settings.ADMIN_EMAILS igual -> lo convertimos a lista y normalizamos a minúsculas
-            allowed_emails = [e.lower() for e in json.loads(settings.ADMIN_EMAILS)]
+            # --- MANEJO DE DOMINIOS ---
+            raw_domains = settings.ADMIN_DOMAINS
+            # Si Pydantic ya lo convirtió a lista, la usamos directo. Si es string, parseamos JSON.
+            if isinstance(raw_domains, list):
+                allowed_domains = raw_domains
+            elif isinstance(raw_domains, str) and raw_domains.strip():
+                allowed_domains = json.loads(raw_domains)
+            else:
+                allowed_domains = []
+            
+            # Limpieza: Aseguramos minúsculas y sin espacios
+            allowed_domains = [str(d).strip().lower() for d in allowed_domains]
+
+            # --- MANEJO DE EMAILS ---
+            raw_emails = settings.ADMIN_EMAILS
+            if isinstance(raw_emails, list):
+                allowed_emails = raw_emails
+            elif isinstance(raw_emails, str) and raw_emails.strip():
+                allowed_emails = json.loads(raw_emails)
+            else:
+                allowed_emails = []
+
+            # Limpieza: Aseguramos minúsculas y sin espacios
+            allowed_emails = [str(e).strip().lower() for e in allowed_emails]
+
         except Exception as e:
-            log.error(f"Error al procesar las listas de control de acceso: {e}")
-            # Si falla el parseo, asumimos listas vacías por seguridad (o para evitar bloqueos accidentales)
+            # Logueamos el error crítico pero no detenemos la app (se asumen listas vacías)
+            log.error(f"CRITICAL: Error cargando listas de acceso. Error: {e}")
             allowed_domains = []
             allowed_emails = []
 
@@ -63,7 +86,7 @@ async def get_current_user(request: Request):
             is_email_authorized = email in allowed_emails
             
             if not (is_domain_authorized or is_email_authorized):
-                log.warning(f"ACCESO DENEGADO: El usuario {email} intentó entrar pero no está autorizado.")
+                log.warning(f"⛔ ACCESO DENEGADO: {email}. Dominio '{domain}' no autorizado.")
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="No tienes autorización para acceder a esta plataforma. Contacta al administrador."
