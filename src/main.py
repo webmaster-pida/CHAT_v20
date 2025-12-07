@@ -2,14 +2,20 @@
 
 import json
 import asyncio
-from fastapi import FastAPI, Request, Depends, HTTPException, status
+import io
+import re
+from datetime import datetime
+from fastapi import FastAPI, Request, Depends, HTTPException, status, Form, Response
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any
 
+# Librerías para documentos
+from docx import Document
+from fpdf import FPDF
+
 from src.config import settings, log
 from src.models.chat_models import ChatRequest, ChatMessage
-# CORRECCIÓN: Imports limpios
 from src.modules import vertex_search_client, gemini_client, rag_client, firestore_client
 from src.core.prompts import PIDA_SYSTEM_PROMPT
 from src.core.security import get_current_user
@@ -22,7 +28,6 @@ app = FastAPI(
 )
 
 # --- CONFIGURACIÓN CORS ---
-# Usamos la lista ya procesada y validada en config.py
 origins = settings.ALLOWED_ORIGINS
 
 app.add_middleware(
@@ -36,50 +41,180 @@ app.add_middleware(
 # --- CLIENTE FIRESTORE ASÍNCRONO ---
 db = firestore.AsyncClient()
 
-# --- FUNCIÓN DE VERIFICACIÓN DE SUSCRIPCIÓN ---
+# --- UTILIDADES DE NOMBRE DE ARCHIVO Y TEXTO (IGUAL QUE ANALIZADOR) ---
+def generate_filename(title: str, extension: str) -> str:
+    """Genera nombre seguro con fecha: Titulo_YYYY-MM-DD-HH-MM-SS.ext"""
+    safe_title = re.sub(r'[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ ]', '', title[:40])
+    safe_title = safe_title.strip().replace(' ', '_')
+    if not safe_title:
+        safe_title = "Chat_PIDA"
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    return f"{safe_title}_{timestamp}.{extension}"
+
+def sanitize_text_for_pdf(text: str) -> str:
+    """Limpia caracteres incompatibles con Latin-1."""
+    if not text: return ""
+    replacements = {
+        "•": "-", "—": "-", "–": "-", "“": '"', "”": '"', "‘": "'", "’": "'", "…": "...",
+        "\u2013": "-", "\u2014": "-", "\u2022": "-", "\uF0B7": "-"
+    }
+    for char, replacement in replacements.items():
+        text = text.replace(char, replacement)
+    return text.encode('latin1', 'replace').decode('latin-1')
+
+def write_markdown_to_pdf(pdf, text):
+    """Interpreta Markdown básico para el PDF."""
+    pdf.set_font("Arial", "", 11)
+    
+    for line in text.split('\n'):
+        line = line.strip()
+        if not line:
+            pdf.ln(5)
+            continue
+            
+        # Detectar roles de chat (ej: **Usuario**:)
+        if line.startswith('**') and ':**' in line:
+            parts = line.split(':**', 1)
+            role = parts[0].replace('**', '')
+            content = parts[1].strip()
+            
+            # Escribir Rol en Negrita y Color
+            pdf.set_font("Arial", "B", 11)
+            pdf.set_text_color(29, 53, 87) # Navy PIDA
+            pdf.write(6, f"{role}: ")
+            
+            # Escribir contenido normal
+            pdf.set_font("Arial", "", 11)
+            pdf.set_text_color(0, 0, 0)
+            
+            # Procesar negritas internas en el contenido
+            sub_parts = re.split(r'(\*\*.*?\*\*)', content)
+            for sp in sub_parts:
+                if sp.startswith('**') and sp.endswith('**'):
+                    pdf.set_font("Arial", "B", 11)
+                    pdf.write(6, sp.strip('*'))
+                    pdf.set_font("Arial", "", 11)
+                else:
+                    pdf.write(6, sp)
+            pdf.ln(6)
+            
+        # Títulos
+        elif line.startswith('## '):
+            pdf.ln(3)
+            pdf.set_font("Arial", "B", 13)
+            pdf.set_text_color(29, 53, 87)
+            pdf.multi_cell(0, 8, line.replace('## ', ''))
+            pdf.set_text_color(0, 0, 0)
+            pdf.set_font("Arial", "", 11)
+            
+        # Listas
+        elif line.startswith('* ') or line.startswith('- '):
+            pdf.set_x(15)
+            pdf.write(6, "- " + line[2:])
+            pdf.ln(6)
+            
+        # Texto normal
+        else:
+            pdf.multi_cell(0, 6, line)
+
+# --- CLASE PDF ---
+class PDF(FPDF):
+    def header(self):
+        self.set_font("Arial", "B", 14)
+        self.set_text_color(29, 53, 87)
+        self.cell(0, 10, "PIDA-AI: Historial de Chat", 0, 1, "L")
+        self.set_font("Arial", "", 9)
+        self.set_text_color(128, 128, 128)
+        self.cell(0, 10, f"Generado: {datetime.now().strftime('%d/%m/%Y, %H:%M:%S')}", 0, 1, "L")
+        self.ln(5)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font("Arial", "", 8)
+        self.set_text_color(128, 128, 128)
+        self.cell(0, 10, f"Pagina {self.page_no()}/{{nb}}", 0, 0, "C")
+
+# --- GENERADORES SÍNCRONOS ---
+def create_chat_docx_sync(chat_text: str, title: str) -> tuple[bytes, str, str]:
+    stream = io.BytesIO()
+    doc = Document()
+    doc.add_heading("PIDA-AI: Historial de Chat", 0)
+    doc.add_paragraph(f"Tema: {title}")
+    doc.add_paragraph(f"Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    doc.add_heading("Conversación", 1)
+    
+    for line in chat_text.split('\n'):
+        if line.strip():
+            doc.add_paragraph(line)
+            
+    doc.save(stream)
+    stream.seek(0)
+    fname = generate_filename(title, "docx")
+    return stream.read(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", fname
+
+def create_chat_pdf_sync(chat_text: str, title: str) -> tuple[bytes, str, str]:
+    safe_text = sanitize_text_for_pdf(chat_text)
+    safe_title = sanitize_text_for_pdf(title)
+    
+    pdf = PDF()
+    pdf.alias_nb_pages()
+    pdf.add_page()
+    
+    # Título del Chat
+    pdf.set_font("Arial", "B", 12)
+    pdf.multi_cell(0, 6, f"Tema: {safe_title}")
+    pdf.ln(5)
+    
+    # Contenido
+    if not safe_text.strip():
+        pdf.multi_cell(0, 6, "[Chat vacío]")
+    else:
+        write_markdown_to_pdf(pdf, safe_text)
+        
+    try:
+        pdf_string = pdf.output(dest='S')
+        if isinstance(pdf_string, str):
+            pdf_bytes = pdf_string.encode('latin-1', 'replace')
+        else:
+            pdf_bytes = pdf_string
+        stream = io.BytesIO(pdf_bytes)
+        fname = generate_filename(title, "pdf")
+        return stream.read(), "application/pdf", fname
+    except Exception as e:
+        print(f"Error PDF: {e}")
+        err = FPDF()
+        err.add_page()
+        err.multi_cell(0, 10, f"Error: {str(e)}")
+        return err.output(dest='S').encode('latin-1'), "application/pdf", "Error.pdf"
+
+# --- VERIFICACIÓN DE SUSCRIPCIÓN ---
 async def verify_active_subscription(current_user: Dict[str, Any]):
-    """
-    Verifica la suscripción de un usuario.
-    Usa las listas optimizadas de settings.
-    """
     user_id = current_user.get("uid")
     user_email = current_user.get("email", "").strip().lower()
     
-    # Listas limpias desde configuración
     admin_domains = settings.ADMIN_DOMAINS
     admin_emails = settings.ADMIN_EMAILS
-
     email_domain = user_email.split("@")[-1] if "@" in user_email else ""
 
-    # 1. Bypass para el equipo interno
     if (email_domain in admin_domains) or (user_email in admin_emails):
         log.info(f"Acceso VIP concedido en Chat: {user_email}")
         return
-    # ---------------------------------
 
-    # 2. Verificación estándar para clientes en Firestore
     try:
         subscriptions_ref = db.collection("customers").document(user_id).collection("subscriptions")
         query = subscriptions_ref.where("status", "in", ["active", "trialing"]).limit(1)
-        
-        # Consumimos el stream asíncrono
         results = [doc async for doc in query.stream()]
-
         if not results:
             raise HTTPException(status_code=403, detail="No tienes una suscripción activa.")
-
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
         log.error(f"Error verificando suscripción DB: {e}")
         raise HTTPException(status_code=500, detail="Error interno verificando suscripción.")
 
-
-# --- GENERADOR DE RESPUESTA STREAMING ---
+# --- GENERADOR STREAMING ---
 async def stream_chat_response_generator(chat_request: ChatRequest, country_code: str | None, user: Dict[str, Any], convo_id: str):
     user_id = user['uid']
-    
-    # 1. Verificar Permisos
     try:
         await verify_active_subscription(user) 
     except HTTPException as e:
@@ -90,19 +225,16 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         return f"data: {json.dumps(data)}\n\n"
 
     try:
-        # 2. Guardar mensaje del usuario
         user_message = ChatMessage(role="user", content=chat_request.prompt)
         await firestore_client.add_message_to_conversation(user_id, convo_id, user_message)
         
         yield create_sse_event({"event": "status", "message": "Iniciando... 🕵️"})
         await asyncio.sleep(0.1) 
         
-        # 3. Preparar Historial
         history_from_db = await firestore_client.get_conversation_messages(user_id, convo_id)
         history_for_gemini = gemini_client.prepare_history_for_vertex(history_from_db[:-1])
         
-        # 4. BÚSQUEDA PARALELA (Vertex AI + RAG Interno)
-        yield create_sse_event({"event": "status", "message": "Consultando jurisprudencia (Vertex AI) y documentos internos..."})
+        yield create_sse_event({"event": "status", "message": "Consultando jurisprudencia..."})
         
         search_tasks = [
             asyncio.to_thread(vertex_search_client.search, chat_request.prompt, num_results=3),
@@ -110,20 +242,15 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         ]
         
         combined_context = ""
-        
         for i, task in enumerate(asyncio.as_completed(search_tasks)):
             result = await task
             combined_context += result
             yield create_sse_event({"event": "status", "message": f"Fuente {i+1} procesada..."})
         
-        yield create_sse_event({"event": "status", "message": "Analizando información..."})
+        yield create_sse_event({"event": "status", "message": "Generando respuesta..."})
         
-        # 5. Construir Prompt Final
         final_prompt = f"Contexto geográfico: {country_code}\n{combined_context}\n\n---\n\nPregunta del usuario: {chat_request.prompt}"
         
-        yield create_sse_event({"event": "status", "message": f"Generando respuesta... 🧠"})
-        
-        # 6. Generar respuesta con Gemini (AHORA ASÍNCRONO REAL)
         full_response_text = ""
         async for chunk in gemini_client.generate_streaming_response(
             system_prompt=PIDA_SYSTEM_PROMPT,
@@ -133,7 +260,6 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
             yield create_sse_event({'text': chunk})
             full_response_text += chunk
 
-        # 7. Guardar respuesta del modelo
         if full_response_text:
             model_message = ChatMessage(role="model", content=full_response_text)
             await firestore_client.add_message_to_conversation(user_id, convo_id, model_message)
@@ -145,12 +271,11 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         error_message = json.dumps({"error": "Ocurrió un error interno al generar la respuesta."})
         yield f"data: {error_message}\n\n"
 
-
 # --- ENDPOINTS ---
 
 @app.get("/status", tags=["Status"])
 def read_status():
-    return {"status": "ok", "message": "PIDA Backend v2.0 (Vertex AI) Online."}
+    return {"status": "ok", "message": "PIDA Chat Backend v3.0 (PDF Fixed)"}
 
 @app.get("/conversations", response_model=List[Dict[str, Any]], tags=["Chat History"])
 async def get_user_conversations(current_user: Dict[str, Any] = Depends(get_current_user)):
@@ -167,8 +292,7 @@ async def create_new_empty_conversation(request: Request, current_user: Dict[str
     await verify_active_subscription(current_user)
     body = await request.json()
     title = body.get("title", "Nuevo Chat")
-    if not title:
-        raise HTTPException(status_code=400, detail="El título no puede estar vacío")
+    if not title: raise HTTPException(400, "El título no puede estar vacío")
     new_convo = await firestore_client.create_new_conversation(current_user['uid'], title)
     return new_convo
 
@@ -179,34 +303,41 @@ async def delete_a_conversation(convo_id: str, current_user: Dict[str, Any] = De
     return
 
 @app.patch("/conversations/{convo_id}/title", status_code=status.HTTP_204_NO_CONTENT, tags=["Chat History"])
-async def update_conversation_title_handler(
-    convo_id: str, 
-    request: Request,
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
+async def update_conversation_title_handler(convo_id: str, request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     await verify_active_subscription(current_user)
     body = await request.json()
     new_title = body.get("title")
-    if not new_title:
-        raise HTTPException(status_code=400, detail="El título no puede estar vacío")
+    if not new_title: raise HTTPException(400, "El título no puede estar vacío")
     await firestore_client.update_conversation_title(current_user['uid'], convo_id, new_title)
     return
 
 @app.post("/chat-stream/{convo_id}", tags=["Chat"])
-async def chat_stream_handler(
-    convo_id: str,
-    chat_request: ChatRequest,
-    request: Request,
+async def chat_stream_handler(convo_id: str, chat_request: ChatRequest, request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
+    country_code = request.headers.get('X-Country-Code', None)
+    headers = { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" }
+    return StreamingResponse(stream_chat_response_generator(chat_request, country_code, current_user, convo_id), headers=headers)
+
+# --- NUEVO ENDPOINT DE DESCARGA (SOLUCIÓN PDF/DOCX) ---
+@app.post("/download-chat", tags=["Chat"])
+async def download_chat(
+    chat_text: str = Form(...),
+    title: str = Form(...),
+    file_format: str = Form("docx"),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    country_code = request.headers.get('X-Country-Code', None)
-    headers = {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "X-Accel-Buffering": "no"
-    }
-    return StreamingResponse(
-        stream_chat_response_generator(chat_request, country_code, current_user, convo_id),
-        headers=headers
-    )
+    """
+    Genera un archivo PDF o DOCX a partir del texto del chat.
+    El formato de texto esperado es:
+    **Rol**: Mensaje
+    ...
+    """
+    try:
+        if file_format.lower() == "docx":
+            content, mime, fname = await asyncio.to_thread(create_chat_docx_sync, chat_text, title)
+        else:
+            content, mime, fname = await asyncio.to_thread(create_chat_pdf_sync, chat_text, title)
+            
+        return Response(content=content, media_type=mime, headers={"Content-Disposition": f"attachment; filename={fname}"})
+    except Exception as e:
+        log.error(f"Error descarga chat: {e}")
+        raise HTTPException(500, f"Error generando archivo: {e}")
