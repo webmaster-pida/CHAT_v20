@@ -16,7 +16,7 @@ async def get_conversations(user_id: str) -> List[Dict[str, Any]]:
         convos = []
         async for doc in conversations_ref.stream():
             data = doc.to_dict()
-            convos.append({"id": doc.id, "title": data.get("title", "Sin Título")})
+            convos.append({"id": doc.id, "title": data.get("title", "Sin Título"), "userId": user_id})
         return convos
     except Exception as e:
         log.error(f"Error al obtener conversaciones para el usuario {user_id}: {e}")
