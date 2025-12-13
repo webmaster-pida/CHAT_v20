@@ -33,6 +33,7 @@ origins = settings.ALLOWED_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"https://pida-ai-v20--.*\.web\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
