@@ -9,19 +9,22 @@ from src.config import settings, log
 
 # --- Inicialización de Firebase Admin ---
 try:
+    # Se intenta inicializar con las credenciales por defecto de Google Cloud
     cred = credentials.ApplicationDefault()
     firebase_admin.initialize_app(cred)
 except ValueError:
+    # Si ya está inicializado (por ejemplo, en hot-reload), ignoramos el error
     pass
 
-# Esquema para documentación
+# Esquema para documentación de Swagger/OpenAPI
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-# --- EL PORTERO ---
+# --- EL PORTERO (SOLO AUTENTICACIÓN) ---
 async def get_current_user(request: Request):
     """
     Dependencia para verificar el token de Firebase ID.
-    Usa listas de acceso pre-procesadas desde settings.
+    Ahora solo verifica que el token sea válido. La lógica de acceso
+    (si es VIP o tiene Stripe) se maneja en 'verify_active_subscription'.
     """
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
@@ -33,31 +36,12 @@ async def get_current_user(request: Request):
     token = auth_header.split("Bearer ")[1]
     
     try:
-        # 1. Verificar firma
+        # 1. Verificar la firma y validez del token con Firebase
         decoded_token = auth.verify_id_token(token)
         
-        # 2. Obtener datos
-        email = decoded_token.get("email", "").lower()
-        domain = email.split("@")[1] if "@" in email else ""
-        
-        # 3. Listas de acceso (YA SON LISTAS LIMPIAS GRACIAS A CONFIG.PY)
-        allowed_domains = settings.ADMIN_DOMAINS
-        allowed_emails = settings.ADMIN_EMAILS
-
-        # 4. APLICAR LÓGICA DE SEGURIDAD
-        has_restrictions = bool(allowed_domains or allowed_emails)
-        
-        if has_restrictions:
-            is_domain_authorized = domain in allowed_domains
-            is_email_authorized = email in allowed_emails
-            
-            if not (is_domain_authorized or is_email_authorized):
-                log.warning(f"⛔ ACCESO DENEGADO: {email}. Dominio '{domain}' no autorizado.")
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="No tienes autorización para acceder a esta plataforma."
-                )
-
+        # 2. Retornamos el token decodificado
+        # Esto permite que usuarios de cualquier dominio (como gmail.com) pasen
+        # este filtro y lleguen a la validación de suscripción en main.py.
         return decoded_token
 
     except auth.ExpiredIdTokenError:
@@ -68,13 +52,11 @@ async def get_current_user(request: Request):
     except auth.InvalidIdTokenError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"El token es inválido: {e}",
+            detail=f"El token es inválido o está mal formado: {e}",
         )
-    except HTTPException as he:
-        raise he
     except Exception as e:
-        log.error(f"Error inesperado en autenticación: {e}", exc_info=True)
+        log.error(f"Error inesperado en el proceso de autenticación: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error interno de seguridad.",
+            detail="Error interno del servicio de seguridad.",
         )
