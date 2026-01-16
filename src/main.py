@@ -412,17 +412,21 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
 async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, Any] = Depends(get_current_user)):
     """
     Crea un PaymentIntent en Stripe. 
-    Se espera en 'data': {'amount': int, 'currency': str}
+    Se espera en 'data': {'amount': int, 'currency': str, 'trial_period_days': int}
     """
     try:
+        # Extraemos los días de prueba enviados desde el frontend (default 0 si no vienen)
+        trial_days = data.get("trial_period_days", 0)
+
         # El monto debe estar en centavos (ej: 2999 para $29.99)
         intent = stripe.PaymentIntent.create(
             amount=data.get("amount"),
             currency=data.get("currency", "usd"),
-            # Vinculamos el UID de Firebase en la metadata para el Webhook
+            # Vinculamos el UID de Firebase y el trial en la metadata para el Webhook
             metadata={
                 "uid": current_user["uid"],
-                "email": current_user.get("email")
+                "email": current_user.get("email"),
+                "trial_days": trial_days # Guardamos esto para procesarlo en el webhook
             }
         )
         return {"clientSecret": intent.client_secret}
@@ -430,7 +434,8 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
         log.error(f"Error creando PaymentIntent: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
-        @app.post("/stripe-webhook", tags=["Billing"])
+# --- NOTA: Esta línea debe estar pegada al borde izquierdo (sin espacios) ---
+@app.post("/stripe-webhook", tags=["Billing"])
 async def stripe_webhook(request: Request):
     payload = await request.body()
     sig_header = request.headers.get("Stripe-Signature")
@@ -440,21 +445,23 @@ async def stripe_webhook(request: Request):
             payload, sig_header, settings.STRIPE_WEBHOOK_SECRET
         )
         
-        # Si el pago fue exitoso
+        # Si el pago o la validación de tarjeta fue exitosa
         if event['type'] == 'payment_intent.succeeded':
             payment_intent = event['data']['object']
             uid = payment_intent['metadata'].get('uid')
+            trial_days = int(payment_intent['metadata'].get('trial_days', 0))
             
             if uid:
                 # 1. Actualizar Firestore para dar acceso inmediato
-                # Los 3 microservicios verán este cambio
+                # Calculamos si hay días de prueba para poner una fecha de 'trial_ends'
                 await db.collection("customers").document(uid).set({
                     "status": "active",
                     "stripe_payment_id": payment_intent['id'],
+                    "has_trial": True if trial_days > 0 else False,
                     "updated_at": firestore.SERVER_TIMESTAMP
                 }, merge=True)
                 
-                log.info(f"Suscripción activada vía Webhook para UID: {uid}")
+                log.info(f"Suscripción activada vía Webhook para UID: {uid} con {trial_days} días de trial")
 
     except ValueError as e:
         return Response(content="Invalid payload", status_code=400)
