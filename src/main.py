@@ -1,5 +1,7 @@
 # /src/main.py
 
+import stripe
+from firebase_admin import auth as firebase_auth
 import json
 import asyncio
 import io
@@ -21,6 +23,9 @@ from src.core.prompts import PIDA_SYSTEM_PROMPT
 from src.core.security import get_current_user
 
 from google.cloud import firestore
+
+# Inicializar Stripe con la llave secreta
+stripe.api_key = settings.STRIPE_SECRET_KEY
 
 app = FastAPI(
     title="PIDA Backend API",
@@ -369,7 +374,7 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
         
         # Si tiene suscripción, el acceso está garantizado.
         if results:
-            return jsonify({"is_vip_user": True})
+            return {"is_vip_user": True}
             
     except Exception as e:
         log.error(f"Error verificando suscripción DB: {e}")
@@ -402,3 +407,61 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
         
     # Si no tiene suscripción activa y no es VIP, el acceso debe ser False.
     return {"is_vip_user": False}
+
+@app.post("/create-payment-intent", tags=["Billing"])
+async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Crea un PaymentIntent en Stripe. 
+    Se espera en 'data': {'amount': int, 'currency': str}
+    """
+    try:
+        # El monto debe estar en centavos (ej: 2999 para $29.99)
+        intent = stripe.PaymentIntent.create(
+            amount=data.get("amount"),
+            currency=data.get("currency", "usd"),
+            # Vinculamos el UID de Firebase en la metadata para el Webhook
+            metadata={
+                "uid": current_user["uid"],
+                "email": current_user.get("email")
+            }
+        )
+        return {"clientSecret": intent.client_secret}
+    except Exception as e:
+        log.error(f"Error creando PaymentIntent: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+        @app.post("/stripe-webhook", tags=["Billing"])
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    sig_header = request.headers.get("Stripe-Signature")
+    
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, settings.STRIPE_WEBHOOK_SECRET
+        )
+        
+        # Si el pago fue exitoso
+        if event['type'] == 'payment_intent.succeeded':
+            payment_intent = event['data']['object']
+            uid = payment_intent['metadata'].get('uid')
+            
+            if uid:
+                # 1. Actualizar Firestore para dar acceso inmediato
+                # Los 3 microservicios verán este cambio
+                await db.collection("customers").document(uid).set({
+                    "status": "active",
+                    "stripe_payment_id": payment_intent['id'],
+                    "updated_at": firestore.SERVER_TIMESTAMP
+                }, merge=True)
+                
+                log.info(f"Suscripción activada vía Webhook para UID: {uid}")
+
+    except ValueError as e:
+        return Response(content="Invalid payload", status_code=400)
+    except stripe.error.SignatureVerificationError as e:
+        return Response(content="Invalid signature", status_code=400)
+    except Exception as e:
+        log.error(f"Error procesando Webhook: {e}")
+        return Response(content=str(e), status_code=500)
+
+    return {"status": "success"}

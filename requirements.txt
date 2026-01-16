@@ -16,3 +16,4 @@ firebase-admin==6.5.0
 google-cloud-discoveryengine
 fpdf
 python-docx
+stripe==11.4.0

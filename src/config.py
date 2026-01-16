@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     TEMPERATURE: float = 0.7
     TOP_P: float = 0.95
 
+    # --- VARIABLES DE STRIPE ---
+    STRIPE_SECRET_KEY: str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
+
     # --- CONTROL DE ACCESO ---
     ALLOWED_ORIGINS: Union[str, List[str]] = '["https://pida.iiresodh.org", "https://pida-ai.com", "https://pida-ai-v20.web.app", "http://localhost", "http://localhost:8080"]'
     ADMIN_DOMAINS: Union[str, List[str]] = '["iiresodh.org", "urquilla.com"]'
