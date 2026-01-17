@@ -26,7 +26,7 @@ from src.core.security import get_current_user
 from google.cloud import firestore
 
 # Inicializar Stripe con la llave secreta
-stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+stripe.api_key = settings.STRIPE_SECRET_KEY
 
 app = FastAPI(
     title="PIDA Backend API",
