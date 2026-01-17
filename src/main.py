@@ -368,6 +368,7 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
     user_email = current_user.get("email", "").strip().lower()
     
     # 1. Chequeo Directo (Webhook Custom)
+    # 1. Chequeo Directo (Webhook Custom)
     try:
         user_doc = await db.collection("customers").document(user_id).get()
         if user_doc.exists and user_doc.to_dict().get("status") == "active":
