@@ -398,15 +398,15 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
 @app.post("/create-payment-intent", tags=["Billing"])
 async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, Any] = Depends(get_current_user)):
     """
-    Crea una SUSCRIPCIÓN real en Stripe.
+    Crea una SUSCRIPCIÓN en Stripe.
+    Si hay trial_days > 0, NO cobra hoy, solo valida la tarjeta.
     """
     try:
         user_email = current_user.get("email")
         uid = current_user["uid"]
         price_id = data.get("priceId")
         plan_key = data.get("plan_key", "unknown")
-        # Leemos los días de prueba que vienen del frontend
-        trial_days = data.get("trial_period_days", 0) 
+        trial_days = int(data.get("trial_period_days", 0))
 
         # 1. BUSCAR O CREAR CLIENTE
         existing_customers = stripe.Customer.list(email=user_email, limit=1)
@@ -416,28 +416,33 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             customer = stripe.Customer.create(email=user_email, metadata={"uid": uid})
 
         # 2. CREAR SUSCRIPCIÓN
-        # NOTA SOBRE TRIALS REALES: Si quisieras que Stripe NO cobre hoy y espere 5 días,
-        # deberías agregar 'trial_period_days=trial_days' aquí abajo.
-        # Pero eso cambia el flujo de pago (PaymentIntent vs SetupIntent).
-        # Por ahora, lo guardamos en metadata para mantener tu lógica de "cobro inicial + trial lógico".
-        
+        # Expandimos 'pending_setup_intent' por si es trial, y 'latest_invoice.payment_intent' por si es pago directo
         subscription = stripe.Subscription.create(
             customer=customer.id,
             items=[{'price': price_id}],
+            trial_period_days=trial_days if trial_days > 0 else None, # <--- AQUI SE APLICA EL TRIAL
             payment_behavior='default_incomplete',
             payment_settings={'save_default_payment_method': 'on_subscription'},
-            expand=['latest_invoice.payment_intent'],
+            expand=['latest_invoice.payment_intent', 'pending_setup_intent'], 
             metadata={
                 "uid": uid,
                 "email": user_email,
                 "plan_key": plan_key,
-                "trial_days": str(trial_days) # <--- Guardamos el valor dinámico
+                "trial_days": str(trial_days)
             }
         )
 
+        # 3. DETERMINAR QUÉ SECRETO DEVOLVER
+        # Si hay trial, usamos el SetupIntent (validar tarjeta sin cobrar).
+        # Si no hay trial, usamos el PaymentIntent (cobrar ahora).
+        if trial_days > 0 and subscription.pending_setup_intent:
+            client_secret = subscription.pending_setup_intent.client_secret
+        else:
+            client_secret = subscription.latest_invoice.payment_intent.client_secret
+
         return {
             "subscriptionId": subscription.id,
-            "clientSecret": subscription.latest_invoice.payment_intent.client_secret
+            "clientSecret": client_secret
         }
 
     except Exception as e:
@@ -455,19 +460,34 @@ async def stripe_webhook(request: Request):
             payload, sig_header, settings.STRIPE_WEBHOOK_SECRET
         )
         
-        # Si el pago o la validación de tarjeta fue exitosa
-        if event['type'] == 'invoice.payment_succeeded':
-            invoice = event['data']['object']
+        data_object = event['data']['object']
+        uid = None
+        plan_key = None
+        
+        # EVENTOS CLAVE PARA SUSCRIPCIONES
+        if event['type'] in ['customer.subscription.created', 'customer.subscription.updated']:
+            uid = data_object.get('metadata', {}).get('uid')
+            plan_key = data_object.get('metadata', {}).get('plan_key')
             
-            # Datos básicos
-            subscription_id = invoice.get('subscription')
-            
-            # Para obtener la metadata (uid, plan), necesitamos consultar la Suscripción
-            # ya que la factura a veces no hereda toda la metadata automáticamente.
+            # Si el status es 'active' o 'trialing', damos acceso
+            stripe_status = data_object.get('status')
+            if stripe_status in ['active', 'trialing']:
+                if uid:
+                    await db.collection("customers").document(uid).set({
+                        "status": "active", # Acceso concedido en PIDA
+                        "stripe_subscription_id": data_object.get('id'),
+                        "plan": plan_key,
+                        "updated_at": firestore.SERVER_TIMESTAMP
+                    }, merge=True)
+                    log.info(f"Suscripción actualizada ({stripe_status}) para: {uid}")
+
+        # EVENTO PARA PAGOS DE FACTURAS (Renovaciones)
+        elif event['type'] == 'invoice.payment_succeeded':
+            subscription_id = data_object.get('subscription')
             if subscription_id:
                 sub = stripe.Subscription.retrieve(subscription_id)
-                uid = sub['metadata'].get('uid')
-                plan_key = sub['metadata'].get('plan_key')
+                uid = sub.get('metadata', {}).get('uid')
+                plan_key = sub.get('metadata', {}).get('plan_key')
                 
                 if uid:
                     await db.collection("customers").document(uid).set({
@@ -476,13 +496,7 @@ async def stripe_webhook(request: Request):
                         "plan": plan_key,
                         "updated_at": firestore.SERVER_TIMESTAMP
                     }, merge=True)
-                    
-                    log.info(f"Suscripción recurrente activada para UID: {uid} - Plan: {plan_key}")
 
-    except ValueError as e:
-        return Response(content="Invalid payload", status_code=400)
-    except stripe.error.SignatureVerificationError as e:
-        return Response(content="Invalid signature", status_code=400)
     except Exception as e:
         log.error(f"Error procesando Webhook: {e}")
         return Response(content=str(e), status_code=500)
