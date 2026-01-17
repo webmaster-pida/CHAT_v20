@@ -503,7 +503,7 @@ async def stripe_webhook(request: Request):
 
     return {"status": "success"}
 
-    @app.post("/create-portal-session", tags=["Billing"])
+@app.post("/create-portal-session", tags=["Billing"])
 async def create_portal_session(request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     """
     Genera una URL para el Portal de Facturación usando la configuración de Python.
