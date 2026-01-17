@@ -44,9 +44,9 @@ class Settings(BaseSettings):
     TOP_P: float = 0.95
 
     # --- VARIABLES DE STRIPE ---
-    STRIPE_SECRET_KEY: str = ""
-    STRIPE_WEBHOOK_SECRET: str = ""
-
+    STRIPE_SECRET_KEY: str = "sk_test_51RMB12GaDEQrzamxdZLI00ipZKlSazwI0ZX22yztJJR0eTh9R3QejzbZbje10YfeZRjzKoMl4l1gQqZqaGp6IY2V00lK4zOIe4"
+    STRIPE_WEBHOOK_SECRET: str = "whsec_KNABkl3vVmx4OL1qQ5pIghq8rmmsFQ0a"
+    
     # --- CONTROL DE ACCESO ---
     ALLOWED_ORIGINS: Union[str, List[str]] = '["https://pida.iiresodh.org", "https://pida-ai.com", "https://pida-ai-v20.web.app", "http://localhost", "http://localhost:8080"]'
     ADMIN_DOMAINS: Union[str, List[str]] = '["iiresodh.org", "urquilla.com"]'
