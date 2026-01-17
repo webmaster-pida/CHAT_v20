@@ -419,15 +419,22 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
         # Extraemos los días de prueba enviados desde el frontend (default 0 si no vienen)
         trial_days = data.get("trial_period_days", 0)
 
-        # El monto debe estar en centavos (ej: 2999 para $29.99)
+        # 1. Crear (o buscar) el cliente en Stripe primero para que aparezca en el Dashboard
+        customer = stripe.Customer.create(
+            email=current_user.get("email"),
+            metadata={"uid": current_user["uid"]}
+        )
+
+        # 2. Crear el Intent asociado al Customer
         intent = stripe.PaymentIntent.create(
             amount=data.get("amount"),
             currency=data.get("currency", "usd"),
-            # Vinculamos el UID de Firebase y el trial en la metadata para el Webhook
+            customer=customer.id, # <--- VINCULACIÓN CRÍTICA
+            setup_future_usage='off_session', 
             metadata={
                 "uid": current_user["uid"],
                 "email": current_user.get("email"),
-                "trial_days": trial_days # Guardamos esto para procesarlo en el webhook
+                "trial_days": trial_days
             }
         )
         return {"clientSecret": intent.client_secret}
