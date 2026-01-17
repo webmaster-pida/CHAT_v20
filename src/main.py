@@ -25,6 +25,27 @@ from src.core.security import get_current_user
 
 from google.cloud import firestore
 
+# MAPA DE TRADUCCIÓN: ID de Stripe -> Nombre del Plan interno
+STRIPE_PRICE_MAP = {
+    # BÁSICO
+    "price_1SqbBOGaDEQrzamxiuEbXIcc": "basico", # USD Mensual
+    "price_1SqFSFGgaloBN5L8BMBeRPqb": "basico", # MXN Mensual
+    "price_1SqFSFGgaloBN5L8kxegWZqC": "basico", # USD Anual
+    "price_1SqFSyGgaloBN5L8rrwrtUau": "basico", # MXN Anual
+    
+    # AVANZADO
+    "price_1SqbD8GaDEQrzamxuV9SQbFB": "avanzado", # USD Mensual
+    "price_1SqFWJGgaloBN5L8roECNay2": "avanzado", # MXN Mensual
+    "price_1SqFWJGgaloBN5L8VKhkzLRH": "avanzado", # USD Anual
+    "price_1SqFWJGgaloBN5L8hKpEvd1v": "avanzado", # MXN Anual
+
+    # PREMIUM
+    "price_1SqbDcGaDEQrzamxdcvIy0BG": "premium", # USD Mensual
+    "price_1SqFadGgaloBN5L8AwTUeTSd": "premium", # MXN Mensual
+    "price_1SqFadGgaloBN5L86iwNYm1c": "premium", # USD Anual
+    "price_1SqFadGgaloBN5L8QFHXe1i9": "premium", # MXN Anual
+}
+
 # Inicializar Stripe con la llave secreta
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
@@ -456,40 +477,60 @@ async def stripe_webhook(request: Request):
     sig_header = request.headers.get("Stripe-Signature")
     
     try:
+        # Usa tu variable forzada o settings según corresponda
+        webhook_secret = settings.STRIPE_WEBHOOK_SECRET # O FORCED_WEBHOOK_SECRET si sigues hardcodeado
+        
         event = stripe.Webhook.construct_event(
-            payload, sig_header, settings.STRIPE_WEBHOOK_SECRET
+            payload, sig_header, webhook_secret
         )
         
         data_object = event['data']['object']
         uid = None
         plan_key = None
         
-        # EVENTOS CLAVE PARA SUSCRIPCIONES
+        # LÓGICA DE DEDUCCIÓN DE PLAN
+        def get_plan_from_obj(obj):
+            # 1. Intentar por Precio (Lo más seguro para cambios en Portal)
+            if 'items' in obj and 'data' in obj['items'] and len(obj['items']['data']) > 0:
+                current_price_id = obj['items']['data'][0]['price']['id']
+                if current_price_id in STRIPE_PRICE_MAP:
+                    return STRIPE_PRICE_MAP[current_price_id]
+            
+            # 2. Intentar por Metadata (Respaldo)
+            return obj.get('metadata', {}).get('plan_key')
+
+        # --- CASO 1: SUSCRIPCIONES (Creada o Actualizada) ---
         if event['type'] in ['customer.subscription.created', 'customer.subscription.updated']:
             uid = data_object.get('metadata', {}).get('uid')
-            plan_key = data_object.get('metadata', {}).get('plan_key')
             
-            # Si el status es 'active' o 'trialing', damos acceso
-            stripe_status = data_object.get('status')
-            if stripe_status in ['active', 'trialing']:
-                if uid:
+            # ¡AQUÍ ESTÁ LA CORRECCIÓN!
+            plan_key = get_plan_from_obj(data_object)
+            
+            status = data_object.get('status')
+            
+            # Aceptamos 'active' y 'trialing'
+            if status in ['active', 'trialing']:
+                if uid and plan_key:
                     await db.collection("customers").document(uid).set({
-                        "status": "active", # Acceso concedido en PIDA
+                        "status": "active",
                         "stripe_subscription_id": data_object.get('id'),
-                        "plan": plan_key,
+                        "plan": plan_key, # Ahora sí se actualizará a "premium"
                         "updated_at": firestore.SERVER_TIMESTAMP
                     }, merge=True)
-                    log.info(f"Suscripción actualizada ({stripe_status}) para: {uid}")
+                    log.info(f"Suscripción actualizada para {uid}: Plan {plan_key} ({status})")
 
-        # EVENTO PARA PAGOS DE FACTURAS (Renovaciones)
+        # --- CASO 2: FACTURA PAGADA ---
         elif event['type'] == 'invoice.payment_succeeded':
             subscription_id = data_object.get('subscription')
             if subscription_id:
+                # Recuperamos la suscripción para ver el precio actual actualizado
                 sub = stripe.Subscription.retrieve(subscription_id)
                 uid = sub.get('metadata', {}).get('uid')
-                plan_key = sub.get('metadata', {}).get('plan_key')
                 
-                if uid:
+                # ¡AQUÍ TAMBIÉN! Usamos el precio actual de la suscripción, no la metadata vieja
+                plan_key = get_plan_from_obj(sub)
+                
+                if uid and plan_key:
                     await db.collection("customers").document(uid).set({
                         "status": "active",
                         "stripe_subscription_id": subscription_id,
