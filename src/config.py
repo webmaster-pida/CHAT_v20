@@ -18,7 +18,7 @@ log = logging.getLogger("pida-backend")
 log.setLevel(logging.INFO)
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
+    model_config = SettingsConfigDict(extra='ignore')
 
     # --- Variables de Google Cloud y API ---
     GOOGLE_CLOUD_PROJECT: str = "pida-ai-v20"
