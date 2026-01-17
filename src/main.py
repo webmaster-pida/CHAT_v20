@@ -404,22 +404,23 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
         # Extraemos los días de prueba enviados desde el frontend (default 0 si no vienen)
         trial_days = data.get("trial_period_days", 0)
 
-        # 1. Crear (o buscar) el cliente en Stripe primero para que aparezca en el Dashboard
+        # 1. Crear (o buscar) el cliente en Stripe primero
         customer = stripe.Customer.create(
             email=current_user.get("email"),
             metadata={"uid": current_user["uid"]}
         )
 
-        # 2. Crear el Intent asociado al Customer
+        # 2. Crear el Intent asociado al Customer CON EL NOMBRE DEL PLAN
         intent = stripe.PaymentIntent.create(
             amount=data.get("amount"),
             currency=data.get("currency", "usd"),
-            customer=customer.id, # <--- VINCULACIÓN CRÍTICA
+            customer=customer.id, 
             setup_future_usage='off_session', 
             metadata={
                 "uid": current_user["uid"],
                 "email": current_user.get("email"),
-                "trial_days": trial_days
+                "trial_days": trial_days,
+                "plan_key": data.get("plan_key", "unknown") # <--- GUARDAMOS QUÉ PLAN ES
             }
         )
         return {"clientSecret": intent.client_secret}
@@ -444,12 +445,15 @@ async def stripe_webhook(request: Request):
             uid = payment_intent['metadata'].get('uid')
             trial_days = int(payment_intent['metadata'].get('trial_days', 0))
             
+            # Recuperamos el plan de la metadata
+            plan_key = payment_intent['metadata'].get('plan_key')
+
             if uid:
-                # 1. Actualizar Firestore para dar acceso inmediato
-                # Calculamos si hay días de prueba para poner una fecha de 'trial_ends'
+                # 1. Actualizar Firestore INCLUYENDO EL PLAN
                 await db.collection("customers").document(uid).set({
                     "status": "active",
                     "stripe_payment_id": payment_intent['id'],
+                    "plan": plan_key, # <--- AQUÍ GUARDAMOS EL PLAN PARA EL BADGE
                     "has_trial": True if trial_days > 0 else False,
                     "updated_at": firestore.SERVER_TIMESTAMP
                 }, merge=True)
