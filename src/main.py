@@ -506,26 +506,35 @@ async def stripe_webhook(request: Request):
 @app.post("/create-portal-session", tags=["Billing"])
 async def create_portal_session(request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
     """
-    Genera una URL para el Portal de Facturación usando la configuración de Python.
+    Genera una URL para el Portal de Facturación.
+    Ahora acepta 'return_url' dinámicamente para soportar entornos de prueba.
     """
     try:
+        # 1. LEER URL DINÁMICA DEL FRONTEND
+        try:
+            body = await request.json()
+            return_url = body.get("return_url")
+        except Exception:
+            return_url = None
+        
+        # Si no nos mandan nada (por error), usamos producción como respaldo
+        if not return_url:
+            return_url = "https://pida-ai-v20.web.app/"
+
         user_email = current_user.get("email")
         
-        # 1. Buscar el cliente en Stripe por su email
-        # (Esto asegura que encontremos al cliente CREADO CON LA LLAVE DE PRUEBA)
+        # 2. Buscar cliente en Stripe
         customers = stripe.Customer.list(email=user_email, limit=1)
         
         if not customers.data:
-            # Si no existe, es porque nunca se suscribió o usó otro email
             raise HTTPException(status_code=404, detail="No se encontró un cliente asociado a este correo en Stripe.")
 
         stripe_customer_id = customers.data[0].id
 
-        # 2. Crear la sesión del portal
-        # Esto usará la stripe.api_key que configuraste en main.py (la de TEST)
+        # 3. Crear sesión con la URL de retorno CORRECTA
         session = stripe.billing_portal.Session.create(
             customer=stripe_customer_id,
-            return_url="https://pida-ai-v20.web.app/" # Al salir del portal, vuelve a tu web
+            return_url=return_url # <--- Aquí sucede la magia
         )
 
         return {"url": session.url}
