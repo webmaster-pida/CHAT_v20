@@ -397,35 +397,50 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
 @app.post("/create-payment-intent", tags=["Billing"])
 async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, Any] = Depends(get_current_user)):
     """
-    Crea un PaymentIntent en Stripe. 
-    Se espera en 'data': {'amount': int, 'currency': str, 'trial_period_days': int}
+    Crea una SUSCRIPCIÓN real en Stripe.
     """
     try:
-        # Extraemos los días de prueba enviados desde el frontend (default 0 si no vienen)
-        trial_days = data.get("trial_period_days", 0)
+        user_email = current_user.get("email")
+        uid = current_user["uid"]
+        price_id = data.get("priceId")
+        plan_key = data.get("plan_key", "unknown")
+        # Leemos los días de prueba que vienen del frontend
+        trial_days = data.get("trial_period_days", 0) 
 
-        # 1. Crear (o buscar) el cliente en Stripe primero
-        customer = stripe.Customer.create(
-            email=current_user.get("email"),
-            metadata={"uid": current_user["uid"]}
-        )
+        # 1. BUSCAR O CREAR CLIENTE
+        existing_customers = stripe.Customer.list(email=user_email, limit=1)
+        if existing_customers and len(existing_customers.data) > 0:
+            customer = existing_customers.data[0]
+        else:
+            customer = stripe.Customer.create(email=user_email, metadata={"uid": uid})
 
-        # 2. Crear el Intent asociado al Customer CON EL NOMBRE DEL PLAN
-        intent = stripe.PaymentIntent.create(
-            amount=data.get("amount"),
-            currency=data.get("currency", "usd"),
-            customer=customer.id, 
-            setup_future_usage='off_session', 
+        # 2. CREAR SUSCRIPCIÓN
+        # NOTA SOBRE TRIALS REALES: Si quisieras que Stripe NO cobre hoy y espere 5 días,
+        # deberías agregar 'trial_period_days=trial_days' aquí abajo.
+        # Pero eso cambia el flujo de pago (PaymentIntent vs SetupIntent).
+        # Por ahora, lo guardamos en metadata para mantener tu lógica de "cobro inicial + trial lógico".
+        
+        subscription = stripe.Subscription.create(
+            customer=customer.id,
+            items=[{'price': price_id}],
+            payment_behavior='default_incomplete',
+            payment_settings={'save_default_payment_method': 'on_subscription'},
+            expand=['latest_invoice.payment_intent'],
             metadata={
-                "uid": current_user["uid"],
-                "email": current_user.get("email"),
-                "trial_days": trial_days,
-                "plan_key": data.get("plan_key", "unknown") # <--- GUARDAMOS QUÉ PLAN ES
+                "uid": uid,
+                "email": user_email,
+                "plan_key": plan_key,
+                "trial_days": str(trial_days) # <--- Guardamos el valor dinámico
             }
         )
-        return {"clientSecret": intent.client_secret}
+
+        return {
+            "subscriptionId": subscription.id,
+            "clientSecret": subscription.latest_invoice.payment_intent.client_secret
+        }
+
     except Exception as e:
-        log.error(f"Error creando PaymentIntent: {e}")
+        log.error(f"Error creando Suscripción: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 # --- NOTA: Esta línea debe estar pegada al borde izquierdo (sin espacios) ---
@@ -440,25 +455,28 @@ async def stripe_webhook(request: Request):
         )
         
         # Si el pago o la validación de tarjeta fue exitosa
-        if event['type'] == 'payment_intent.succeeded':
-            payment_intent = event['data']['object']
-            uid = payment_intent['metadata'].get('uid')
-            trial_days = int(payment_intent['metadata'].get('trial_days', 0))
+        if event['type'] == 'invoice.payment_succeeded':
+            invoice = event['data']['object']
             
-            # Recuperamos el plan de la metadata
-            plan_key = payment_intent['metadata'].get('plan_key')
-
-            if uid:
-                # 1. Actualizar Firestore INCLUYENDO EL PLAN
-                await db.collection("customers").document(uid).set({
-                    "status": "active",
-                    "stripe_payment_id": payment_intent['id'],
-                    "plan": plan_key, # <--- AQUÍ GUARDAMOS EL PLAN PARA EL BADGE
-                    "has_trial": True if trial_days > 0 else False,
-                    "updated_at": firestore.SERVER_TIMESTAMP
-                }, merge=True)
+            # Datos básicos
+            subscription_id = invoice.get('subscription')
+            
+            # Para obtener la metadata (uid, plan), necesitamos consultar la Suscripción
+            # ya que la factura a veces no hereda toda la metadata automáticamente.
+            if subscription_id:
+                sub = stripe.Subscription.retrieve(subscription_id)
+                uid = sub['metadata'].get('uid')
+                plan_key = sub['metadata'].get('plan_key')
                 
-                log.info(f"Suscripción activada vía Webhook para UID: {uid} con {trial_days} días de trial")
+                if uid:
+                    await db.collection("customers").document(uid).set({
+                        "status": "active",
+                        "stripe_subscription_id": subscription_id,
+                        "plan": plan_key,
+                        "updated_at": firestore.SERVER_TIMESTAMP
+                    }, merge=True)
+                    
+                    log.info(f"Suscripción recurrente activada para UID: {uid} - Plan: {plan_key}")
 
     except ValueError as e:
         return Response(content="Invalid payload", status_code=400)
