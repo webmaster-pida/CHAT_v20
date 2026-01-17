@@ -420,7 +420,7 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
 async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, Any] = Depends(get_current_user)):
     """
     Crea una SUSCRIPCIÓN en Stripe.
-    Si hay trial_days > 0, NO cobra hoy, solo valida la tarjeta.
+    Recibe 'name' opcional para registrar al cliente con nombre real.
     """
     try:
         user_email = current_user.get("email")
@@ -428,20 +428,31 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
         price_id = data.get("priceId")
         plan_key = data.get("plan_key", "unknown")
         trial_days = int(data.get("trial_period_days", 0))
+        
+        # NUEVO: Recibir nombre
+        customer_name = data.get("name", "") 
 
         # 1. BUSCAR O CREAR CLIENTE
         existing_customers = stripe.Customer.list(email=user_email, limit=1)
+        
         if existing_customers and len(existing_customers.data) > 0:
             customer = existing_customers.data[0]
+            # Opcional: Actualizar el nombre en Stripe si ya existía pero no tenía nombre
+            if customer_name and not customer.name:
+                stripe.Customer.modify(customer.id, name=customer_name)
         else:
-            customer = stripe.Customer.create(email=user_email, metadata={"uid": uid})
+            # NUEVO: Crear cliente CON NOMBRE
+            customer_args = {"email": user_email, "metadata": {"uid": uid}}
+            if customer_name:
+                customer_args["name"] = customer_name
+                
+            customer = stripe.Customer.create(**customer_args)
 
-        # 2. CREAR SUSCRIPCIÓN
-        # Expandimos 'pending_setup_intent' por si es trial, y 'latest_invoice.payment_intent' por si es pago directo
+        # 2. CREAR SUSCRIPCIÓN (Igual que antes)
         subscription = stripe.Subscription.create(
             customer=customer.id,
             items=[{'price': price_id}],
-            trial_period_days=trial_days if trial_days > 0 else None, # <--- AQUI SE APLICA EL TRIAL
+            trial_period_days=trial_days if trial_days > 0 else None,
             payment_behavior='default_incomplete',
             payment_settings={'save_default_payment_method': 'on_subscription'},
             expand=['latest_invoice.payment_intent', 'pending_setup_intent'], 
