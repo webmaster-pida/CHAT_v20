@@ -502,3 +502,34 @@ async def stripe_webhook(request: Request):
         return Response(content=str(e), status_code=500)
 
     return {"status": "success"}
+
+    @app.post("/create-portal-session", tags=["Billing"])
+async def create_portal_session(request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Genera una URL para el Portal de Facturación usando la configuración de Python.
+    """
+    try:
+        user_email = current_user.get("email")
+        
+        # 1. Buscar el cliente en Stripe por su email
+        # (Esto asegura que encontremos al cliente CREADO CON LA LLAVE DE PRUEBA)
+        customers = stripe.Customer.list(email=user_email, limit=1)
+        
+        if not customers.data:
+            # Si no existe, es porque nunca se suscribió o usó otro email
+            raise HTTPException(status_code=404, detail="No se encontró un cliente asociado a este correo en Stripe.")
+
+        stripe_customer_id = customers.data[0].id
+
+        # 2. Crear la sesión del portal
+        # Esto usará la stripe.api_key que configuraste en main.py (la de TEST)
+        session = stripe.billing_portal.Session.create(
+            customer=stripe_customer_id,
+            return_url="https://pida-ai-v20.web.app/" # Al salir del portal, vuelve a tu web
+        )
+
+        return {"url": session.url}
+
+    except Exception as e:
+        log.error(f"Error generando sesión del portal: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
