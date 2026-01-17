@@ -195,7 +195,7 @@ def create_chat_pdf_sync(chat_text: str, title: str) -> tuple[bytes, str, str]:
         err.multi_cell(0, 10, f"Error: {str(e)}")
         return err.output(dest='S').encode('latin-1'), "application/pdf", "Error.pdf"
 
-# --- VERIFICACIÓN DE SUSCRIPCIÓN ---
+# --- VERIFICACIÓN DE SUSCRIPCIÓN (CORREGIDA) ---
 async def verify_active_subscription(current_user: Dict[str, Any]):
     user_id = current_user.get("uid")
     user_email = current_user.get("email", "").strip().lower()
@@ -209,17 +209,28 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
         return
 
     try:
+        # 1. VERIFICACIÓN DIRECTA (Webhook Custom)
+        # Revisamos si el documento principal del cliente tiene status 'active'
+        user_doc = await db.collection("customers").document(user_id).get()
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            if user_data.get("status") == "active":
+                return # Acceso concedido
+
+        # 2. VERIFICACIÓN DE SUSCRIPCIONES (Stripe Extension)
         subscriptions_ref = db.collection("customers").document(user_id).collection("subscriptions")
         query = subscriptions_ref.where("status", "in", ["active", "trialing"]).limit(1)
         results = [doc async for doc in query.stream()]
+        
         if not results:
+            # Si falla en ambos lados, denegamos
             raise HTTPException(status_code=403, detail="No tienes una suscripción activa.")
+            
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
         log.error(f"Error verificando suscripción DB: {e}")
         raise HTTPException(status_code=500, detail="Error interno verificando suscripción.")
-
 # --- GENERADOR STREAMING ---
 async def stream_chat_response_generator(chat_request: ChatRequest, country_code: str | None, user: Dict[str, Any], convo_id: str):
     user_id = user['uid']
@@ -353,60 +364,34 @@ async def download_chat(
 # --- NUEVO ENDPOINT DE VERIFICACIÓN VIP PARA EL FRONTEND ---
 @app.post("/check-vip-access", tags=["Security"])
 async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_current_user)):
-    """
-    Endpoint simple para que el frontend verifique si el usuario tiene acceso VIP 
-    antes de la verificación de suscripción de Stripe.
-    
-    NOTA: La lógica de acceso VIP (ADMIN_DOMAINS/EMAILS) se aplica dentro de get_current_user.
-    Si el usuario llega aquí, significa que get_current_user NO le denegó el acceso.
-    Por lo tanto, si get_current_user NO levantó 403, significa que el usuario es VIP.
-    """
-    
-    # 1. Verificar Stripe (Lo hacemos aquí también, para ser coherentes con verify_active_subscription)
     user_id = current_user.get("uid")
     user_email = current_user.get("email", "").strip().lower()
     
-    # La lógica de seguridad ya verificó si es VIP. 
-    # Si llegó aquí, es un usuario válido. Ahora, ¿tiene suscripción?
+    # 1. Chequeo Directo (Webhook Custom)
     try:
+        user_doc = await db.collection("customers").document(user_id).get()
+        if user_doc.exists and user_doc.to_dict().get("status") == "active":
+            return {"is_vip_user": True}
+            
+        # 2. Chequeo Suscripciones (Stripe Extension)
         subscriptions_ref = db.collection("customers").document(user_id).collection("subscriptions")
         query = subscriptions_ref.where("status", "in", ["active", "trialing"]).limit(1)
         results = [doc async for doc in query.stream()]
-        
-        # Si tiene suscripción, el acceso está garantizado.
         if results:
             return {"is_vip_user": True}
             
     except Exception as e:
         log.error(f"Error verificando suscripción DB: {e}")
-        # Si falla la DB, por seguridad, devolvemos False, pero es un fallo interno.
-        # Dejamos que la lógica de abajo determine el acceso.
         pass 
         
-    # Si la suscripción no está activa, chequeamos las reglas VIP/ADMIN.
-    # Como get_current_user ya aplicó la restricción, si el usuario aún tiene acceso 
-    # a este endpoint, es porque cumplió con las reglas de seguridad
-    # (es decir, es un admin/VIP).
-
-    # La única forma en que get_current_user permite el paso es si:
-    # 1) No hay restricciones (has_restrictions es False).
-    # 2) O si el email/dominio está en la lista (is_domain/email_authorized es True).
-    
-    # Dado que el frontend solo llama a esto si *falló* el chequeo de Stripe,
-    # solo queremos saber si el usuario pasó la seguridad por ser VIP/Admin.
-    
-    # Si el usuario llega a esta línea, es porque get_current_user lo dejó pasar.
-    # Si get_current_user lo dejó pasar Y no tiene Stripe, debe ser porque es VIP.
-    
+    # 3. Chequeo VIP/Admin (Dominios)
     admin_domains = settings.ADMIN_DOMAINS
     admin_emails = settings.ADMIN_EMAILS
     email_domain = user_email.split("@")[-1] if "@" in user_email else ""
 
     if (email_domain in admin_domains) or (user_email in admin_emails):
-        log.info(f"Acceso VIP/Admin confirmado para {user_email}.")
         return {"is_vip_user": True}
         
-    # Si no tiene suscripción activa y no es VIP, el acceso debe ser False.
     return {"is_vip_user": False}
 
 @app.post("/create-payment-intent", tags=["Billing"])
