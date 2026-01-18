@@ -46,6 +46,14 @@ STRIPE_PRICE_MAP = {
     "price_1SqFadGgaloBN5L8QFHXe1i9": "premium", # MXN Anual
 }
 
+# --- LÍMITES DE CHAT (Definidos en src/config.py) ---
+CHAT_LIMITS = {
+    "demo": settings.LIMIT_DEMO_CHAT_DAILY,
+    "basico": settings.LIMIT_BASICO_CHAT_DAILY,
+    "avanzado": settings.LIMIT_AVANZADO_CHAT_DAILY,
+    "premium": settings.LIMIT_PREMIUM_CHAT_DAILY
+}
+
 # Inicializar Stripe con la llave secreta
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
@@ -252,6 +260,52 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
     except Exception as e:
         log.error(f"Error verificando suscripción DB: {e}")
         raise HTTPException(status_code=500, detail="Error interno verificando suscripción.")
+
+# --- LÓGICA DE CONTROL DE LÍMITES E INCREMENTO DE USO ---
+async def check_chat_limit(user_id: str, plan: str):
+    """
+    Verifica si el usuario superó su límite diario.
+    Lanza 429 si se excede.
+    """
+    # Normalizar nombre del plan (ej: "Básico" -> "basico")
+    plan_key = plan.lower().replace('á', 'a').strip()
+    
+    # Obtenemos el límite desde el diccionario que ya tiene los datos de settings
+    limit = CHAT_LIMITS.get(plan_key, CHAT_LIMITS['demo']) 
+    
+    # -1 significa ilimitado (para admins o pruebas internas)
+    if limit == -1: return
+
+    # Fecha actual UTC (YYYY-MM-DD)
+    today = datetime.now().strftime('%Y-%m-%d')
+    
+    # Referencia al documento de estadísticas en Firestore
+    stats_ref = db.collection('users').document(user_id).collection('usage_stats').document(today)
+    
+    doc = await stats_ref.get()
+    current_count = 0
+    
+    if doc.exists:
+        current_count = doc.to_dict().get('chat_count', 0)
+        
+    if current_count >= limit:
+        # IMPORTANTE: Este error 429 activa la tarjeta roja en el Frontend
+        raise HTTPException(
+            status_code=429, 
+            detail=f"Límite diario alcanzado para el plan {plan_key}"
+        )
+
+async def increment_chat_count(user_id: str):
+    """Incrementa el contador +1 después de un éxito"""
+    today = datetime.now().strftime('%Y-%m-%d')
+    stats_ref = db.collection('users').document(user_id).collection('usage_stats').document(today)
+    
+    # Usamos set con merge para crear o actualizar atómicamente
+    await stats_ref.set({
+        'chat_count': firestore.Increment(1),
+        'last_updated': firestore.SERVER_TIMESTAMP
+    }, merge=True)
+
 # --- GENERADOR STREAMING ---
 async def stream_chat_response_generator(chat_request: ChatRequest, country_code: str | None, user: Dict[str, Any], convo_id: str):
     user_id = user['uid']
@@ -351,11 +405,61 @@ async def update_conversation_title_handler(convo_id: str, request: Request, cur
     await firestore_client.update_conversation_title(current_user['uid'], convo_id, new_title)
     return
 
+# --- ENDPOINT DEL CHAT MODIFICADO CON CONTROL DE LÍMITES ---
 @app.post("/chat-stream/{convo_id}", tags=["Chat"])
-async def chat_stream_handler(convo_id: str, chat_request: ChatRequest, request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
+async def chat_stream_handler(
+    convo_id: str, 
+    chat_request: ChatRequest, 
+    request: Request, 
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    # 1. Recuperar el Country Code (AQUÍ ESTÁ LO QUE FALTABA)
+    # Viene del Frontend en el header 'X-Country-Code'
     country_code = request.headers.get('X-Country-Code', None)
-    headers = { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no" }
-    return StreamingResponse(stream_chat_response_generator(chat_request, country_code, current_user, convo_id), headers=headers)
+
+    # 2. Obtener el ID y el Plan del Usuario
+    user_id = current_user['uid']
+    user_plan = 'demo' # Plan por defecto si falla la lectura
+    
+    try:
+        # Consultamos Firestore para saber el plan real
+        cust_doc = await db.collection('customers').document(user_id).get()
+        if cust_doc.exists:
+            data = cust_doc.to_dict()
+            # Solo si está activo le damos su plan real, sino se queda en demo
+            if data.get('status') == 'active':
+                user_plan = data.get('plan', 'basico')
+                # Si es un trial (prueba gratis), le damos acceso 'basico'
+                if data.get('has_trial'):
+                    user_plan = 'basico'
+    except Exception as e:
+        log.error(f"Error obteniendo plan usuario: {e}")
+
+    # 3. VERIFICAR LÍMITE (Aquí se detiene y lanza error 429 si ya no tiene saldo)
+    await check_chat_limit(user_id, user_plan)
+
+    # 4. Generador Envoltorio (Para contar el uso al final)
+    async def counted_stream_generator():
+        # Llamamos a la IA pasando el country_code que recuperamos arriba
+        async for chunk in stream_chat_response_generator(
+            chat_request, 
+            country_code,  # <--- Pasamos el código de país aquí
+            current_user, 
+            convo_id
+        ):
+            yield chunk
+            
+        # Si el stream termina exitosamente, incrementamos el contador en background
+        asyncio.create_task(increment_chat_count(user_id))
+
+    headers = { 
+        "Content-Type": "text/event-stream", 
+        "Cache-Control": "no-cache", 
+        "Connection": "keep-alive", 
+        "X-Accel-Buffering": "no" 
+    }
+    
+    return StreamingResponse(counted_stream_generator(), headers=headers)
 
 # --- NUEVO ENDPOINT DE DESCARGA (SOLUCIÓN PDF/DOCX) ---
 @app.post("/download-chat", tags=["Chat"])

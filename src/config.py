@@ -18,7 +18,7 @@ log = logging.getLogger("pida-backend")
 log.setLevel(logging.INFO)
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(extra='ignore')
+    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
     # --- Variables de Google Cloud y API ---
     GOOGLE_CLOUD_PROJECT: str = "pida-ai-v20"
@@ -30,12 +30,11 @@ class Settings(BaseSettings):
     VERTEX_SEARCH_LOCATION: str = "global"
     VERTEX_SEARCH_DATA_STORE_ID: str = "almacen-web-pida_1765039607916"
 
-    # PSE (Búsqueda antigua) - Las mantenemos opcionales o con string vacío para que no rompan el inicio
-    # Si Cloud Run las tiene configuradas, las usará. Si no, usará "".
+    # PSE (Búsqueda antigua)
     PSE_API_KEY: str = ""
     PSE_ID: str = ""
     
-    # URL del RAG (CRÍTICO: Agregamos el default aquí para corregir tu error)
+    # URL del RAG
     RAG_API_URL: str = "https://pida-rag-api-640849120264.us-central1.run.app/query"
 
     # --- Variables del Modelo Generativo ---
@@ -44,9 +43,17 @@ class Settings(BaseSettings):
     TOP_P: float = 0.95
 
     # --- VARIABLES DE STRIPE ---
-    STRIPE_SECRET_KEY: str = "sk_test_51RMB12GaDEQrzamxdZLI00ipZKlSazwI0ZX22yztJJR0eTh9R3QejzbZbje10YfeZRjzKoMl4l1gQqZqaGp6IY2V00lK4zOIe4"
-    STRIPE_WEBHOOK_SECRET: str = "whsec_KNABkl3vVmx4OL1qQ5pIghq8rmmsFQ0a"
-    
+    STRIPE_SECRET_KEY: str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
+
+    # --- VARIABLES DE LÍMITES DE CHAT (NUEVO) ---
+    # Estos valores actúan como "default". Si en Cloud Run defines la variable de entorno,
+    # Pydantic tomará el valor de Cloud Run automáticamente.
+    LIMIT_DEMO_CHAT_DAILY: int = 1
+    LIMIT_BASICO_CHAT_DAILY: int = 5
+    LIMIT_AVANZADO_CHAT_DAILY: int = 20
+    LIMIT_PREMIUM_CHAT_DAILY: int = 100
+
     # --- CONTROL DE ACCESO ---
     ALLOWED_ORIGINS: Union[str, List[str]] = '["https://pida.iiresodh.org", "https://pida-ai.com", "https://pida-ai-v20.web.app", "http://localhost", "http://localhost:8080"]'
     ADMIN_DOMAINS: Union[str, List[str]] = '["iiresodh.org", "urquilla.com"]'
