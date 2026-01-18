@@ -697,7 +697,7 @@ async def create_portal_session(request: Request, current_user: Dict[str, Any] =
         
         # Si no nos mandan nada (por error), usamos producción como respaldo
         if not return_url:
-            return_url = "https://pida-ai-v20.web.app/"
+            return_url = "https://pida-ai.com/"
 
         user_email = current_user.get("email")
         
