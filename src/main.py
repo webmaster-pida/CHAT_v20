@@ -48,7 +48,6 @@ STRIPE_PRICE_MAP = {
 
 # --- LÍMITES DE CHAT (Definidos en src/config.py) ---
 CHAT_LIMITS = {
-    "demo": settings.LIMIT_DEMO_CHAT_DAILY,
     "basico": settings.LIMIT_BASICO_CHAT_DAILY,
     "avanzado": settings.LIMIT_AVANZADO_CHAT_DAILY,
     "premium": settings.LIMIT_PREMIUM_CHAT_DAILY,
@@ -278,7 +277,7 @@ async def check_chat_limit(user_id: str, plan: str):
     plan_key = plan.lower().replace('á', 'a').strip()
     
     # Obtenemos el límite desde el diccionario que ya tiene los datos de settings
-    limit = CHAT_LIMITS.get(plan_key, CHAT_LIMITS['demo']) 
+    limit = CHAT_LIMITS.get(plan_key, 0)
     
     # -1 significa ilimitado (para admins o pruebas internas)
     if limit == -1: return
@@ -427,7 +426,7 @@ async def chat_stream_handler(
     # 2. Obtener el ID y el Plan del Usuario
     user_id = current_user['uid']
     user_email = current_user.get('email', '').strip().lower()
-    user_plan = 'demo' # Plan por defecto
+    user_plan = 'none' # Plan por defecto (sin acceso)
 
     # --- LÓGICA DE DETECCIÓN VIP (PRIORIDAD MÁXIMA) ---
     # Si es VIP por dominio o email específico, forzamos plan 'vip' (ilimitado)
