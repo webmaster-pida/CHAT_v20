@@ -525,6 +525,7 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
     """
     Crea una SUSCRIPCIÓN en Stripe.
     Recibe 'name' opcional para registrar al cliente con nombre real.
+    Recibe 'promotion_code' opcional para aplicar descuentos.
     """
     try:
         user_email = current_user.get("email")
@@ -532,11 +533,24 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
         price_id = data.get("priceId")
         plan_key = data.get("plan_key", "unknown")
         trial_days = int(data.get("trial_period_days", 0))
-        
-        # NUEVO: Recibir nombre
         customer_name = data.get("name", "") 
+        
+        # --- 1. LÓGICA DE CUPONES (NUEVO) ---
+        user_promo_code = data.get("promotion_code", "").strip()
+        promo_id = None
 
-        # 1. BUSCAR O CREAR CLIENTE
+        if user_promo_code:
+            # Buscamos en Stripe si el código de texto (ej: "PIDA20") existe y está activo
+            promos = stripe.PromotionCode.list(code=user_promo_code, active=True, limit=1)
+            
+            if promos.data:
+                # Si existe, tomamos su ID interno (ej: "promo_1Js...")
+                promo_id = promos.data[0].id
+            else:
+                # Si no existe, detenemos todo y avisamos al frontend
+                raise HTTPException(status_code=400, detail=f"El código de descuento '{user_promo_code}' no es válido o ha expirado.")
+
+        # --- 2. BUSCAR O CREAR CLIENTE ---
         existing_customers = stripe.Customer.list(email=user_email, limit=1)
         
         if existing_customers and len(existing_customers.data) > 0:
@@ -545,18 +559,19 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             if customer_name and not customer.name:
                 stripe.Customer.modify(customer.id, name=customer_name)
         else:
-            # NUEVO: Crear cliente CON NOMBRE
+            # Crear cliente nuevo
             customer_args = {"email": user_email, "metadata": {"uid": uid}}
             if customer_name:
                 customer_args["name"] = customer_name
                 
             customer = stripe.Customer.create(**customer_args)
 
-        # 2. CREAR SUSCRIPCIÓN (Igual que antes)
+        # --- 3. CREAR SUSCRIPCIÓN ---
         subscription = stripe.Subscription.create(
             customer=customer.id,
             items=[{'price': price_id}],
             trial_period_days=trial_days if trial_days > 0 else None,
+            promotion_code=promo_id, # <--- AQUÍ SE APLICA EL DESCUENTO
             payment_behavior='default_incomplete',
             payment_settings={'save_default_payment_method': 'on_subscription'},
             expand=['latest_invoice.payment_intent', 'pending_setup_intent'], 
@@ -568,9 +583,7 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             }
         )
 
-        # 3. DETERMINAR QUÉ SECRETO DEVOLVER
-        # Si hay trial, usamos el SetupIntent (validar tarjeta sin cobrar).
-        # Si no hay trial, usamos el PaymentIntent (cobrar ahora).
+        # --- 4. DETERMINAR QUÉ SECRETO DEVOLVER ---
         if trial_days > 0 and subscription.pending_setup_intent:
             client_secret = subscription.pending_setup_intent.client_secret
         else:
@@ -581,6 +594,9 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             "clientSecret": client_secret
         }
 
+    except HTTPException as http_e:
+        # Re-lanzar errores HTTP específicos (como el del cupón inválido)
+        raise http_e
     except Exception as e:
         log.error(f"Error creando Suscripción: {e}")
         raise HTTPException(status_code=400, detail=str(e))
