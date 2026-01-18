@@ -504,32 +504,18 @@ async def download_chat(
 # --- NUEVO ENDPOINT DE VERIFICACIÓN VIP PARA EL FRONTEND ---
 @app.post("/check-vip-access", tags=["Security"])
 async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_current_user)):
-    user_id = current_user.get("uid")
+    """
+    Verifica ESTRICTAMENTE si el usuario es VIP por configuración (Email o Dominio).
+    NO verifica suscripciones activas de Stripe (eso se hace en Firestore).
+    """
     user_email = current_user.get("email", "").strip().lower()
     
-    # 1. Chequeo Directo (Webhook Custom)
-    # 1. Chequeo Directo (Webhook Custom)
-    try:
-        user_doc = await db.collection("customers").document(user_id).get()
-        if user_doc.exists and user_doc.to_dict().get("status") == "active":
-            return {"is_vip_user": True}
-            
-        # 2. Chequeo Suscripciones (Stripe Extension)
-        subscriptions_ref = db.collection("customers").document(user_id).collection("subscriptions")
-        query = subscriptions_ref.where("status", "in", ["active", "trialing"]).limit(1)
-        results = [doc async for doc in query.stream()]
-        if results:
-            return {"is_vip_user": True}
-            
-    except Exception as e:
-        log.error(f"Error verificando suscripción DB: {e}")
-        pass 
-        
-    # 3. Chequeo VIP/Admin (Dominios)
+    # Lista de Dominios y Correos VIP (desde config.py)
     admin_domains = settings.ADMIN_DOMAINS
     admin_emails = settings.ADMIN_EMAILS
     email_domain = user_email.split("@")[-1] if "@" in user_email else ""
 
+    # Solo retornamos True si coincide con la lista VIP
     if (email_domain in admin_domains) or (user_email in admin_emails):
         return {"is_vip_user": True}
         
