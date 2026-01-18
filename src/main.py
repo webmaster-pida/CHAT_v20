@@ -52,6 +52,7 @@ CHAT_LIMITS = {
     "basico": settings.LIMIT_BASICO_CHAT_DAILY,
     "avanzado": settings.LIMIT_AVANZADO_CHAT_DAILY,
     "premium": settings.LIMIT_PREMIUM_CHAT_DAILY
+    "vip": -1
 }
 
 # Inicializar Stripe con la llave secreta
@@ -425,21 +426,29 @@ async def chat_stream_handler(
 
     # 2. Obtener el ID y el Plan del Usuario
     user_id = current_user['uid']
-    user_plan = 'demo' # Plan por defecto si falla la lectura
-    
-    try:
-        # Consultamos Firestore para saber el plan real
-        cust_doc = await db.collection('customers').document(user_id).get()
-        if cust_doc.exists:
-            data = cust_doc.to_dict()
-            # Solo si está activo le damos su plan real, sino se queda en demo
-            if data.get('status') == 'active':
-                user_plan = data.get('plan', 'basico')
-                # Si es un trial (prueba gratis), le damos acceso 'basico'
-                if data.get('has_trial'):
-                    user_plan = 'basico'
-    except Exception as e:
-        log.error(f"Error obteniendo plan usuario: {e}")
+    user_email = current_user.get('email', '').strip().lower()
+    user_plan = 'demo' # Plan por defecto
+
+    # --- LÓGICA DE DETECCIÓN VIP (PRIORIDAD MÁXIMA) ---
+    # Si es VIP por dominio o email específico, forzamos plan 'vip' (ilimitado)
+    admin_domains = settings.ADMIN_DOMAINS
+    admin_emails = settings.ADMIN_EMAILS
+    email_domain = user_email.split("@")[-1] if "@" in user_email else ""
+
+    if (email_domain in admin_domains) or (user_email in admin_emails):
+        user_plan = 'vip'
+    else:
+        # Si NO es VIP, buscamos su plan normal en la BD
+        try:
+            cust_doc = await db.collection('customers').document(user_id).get()
+            if cust_doc.exists:
+                data = cust_doc.to_dict()
+                if data.get('status') == 'active':
+                    user_plan = data.get('plan', 'basico')
+                    if data.get('has_trial'):
+                        user_plan = 'basico'
+        except Exception as e:
+            log.error(f"Error obteniendo plan usuario: {e}")
 
     # 3. VERIFICAR LÍMITE (Aquí se detiene y lanza error 429 si ya no tiene saldo)
     await check_chat_limit(user_id, user_plan)
