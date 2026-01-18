@@ -7,7 +7,7 @@ import json
 import asyncio
 import io
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Request, Depends, HTTPException, status, Form, Response
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -261,6 +261,12 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
         log.error(f"Error verificando suscripción DB: {e}")
         raise HTTPException(status_code=500, detail="Error interno verificando suscripción.")
 
+    def get_date_utc_minus_6() -> str:
+        """Devuelve la fecha actual ajustada a la zona horaria UTC-6"""
+        utc_now = datetime.now(timezone.utc)
+        cst_now = utc_now - timedelta(hours=6)
+        return cst_now.strftime('%Y-%m-%d')
+
 # --- LÓGICA DE CONTROL DE LÍMITES E INCREMENTO DE USO ---
 async def check_chat_limit(user_id: str, plan: str):
     """
@@ -276,8 +282,8 @@ async def check_chat_limit(user_id: str, plan: str):
     # -1 significa ilimitado (para admins o pruebas internas)
     if limit == -1: return
 
-    # Fecha actual UTC (YYYY-MM-DD)
-    today = datetime.now().strftime('%Y-%m-%d')
+    # Usamos la fecha UTC-6
+    today = get_date_utc_minus_6()
     
     # Referencia al documento de estadísticas en Firestore
     stats_ref = db.collection('users').document(user_id).collection('usage_stats').document(today)
@@ -297,7 +303,7 @@ async def check_chat_limit(user_id: str, plan: str):
 
 async def increment_chat_count(user_id: str):
     """Incrementa el contador +1 después de un éxito"""
-    today = datetime.now().strftime('%Y-%m-%d')
+    today = get_date_utc_minus_6()
     stats_ref = db.collection('users').document(user_id).collection('usage_stats').document(today)
     
     # Usamos set con merge para crear o actualizar atómicamente
