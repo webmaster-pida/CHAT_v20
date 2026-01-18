@@ -51,7 +51,7 @@ CHAT_LIMITS = {
     "demo": settings.LIMIT_DEMO_CHAT_DAILY,
     "basico": settings.LIMIT_BASICO_CHAT_DAILY,
     "avanzado": settings.LIMIT_AVANZADO_CHAT_DAILY,
-    "premium": settings.LIMIT_PREMIUM_CHAT_DAILY
+    "premium": settings.LIMIT_PREMIUM_CHAT_DAILY,
     "vip": -1
 }
 
