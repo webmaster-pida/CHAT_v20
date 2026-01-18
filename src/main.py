@@ -261,11 +261,11 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
         log.error(f"Error verificando suscripción DB: {e}")
         raise HTTPException(status_code=500, detail="Error interno verificando suscripción.")
 
-    def get_date_utc_minus_6() -> str:
-        """Devuelve la fecha actual ajustada a la zona horaria UTC-6"""
-        utc_now = datetime.now(timezone.utc)
-        cst_now = utc_now - timedelta(hours=6)
-        return cst_now.strftime('%Y-%m-%d')
+def get_date_utc_minus_6() -> str:
+    """Devuelve la fecha actual ajustada a la zona horaria UTC-6"""
+    utc_now = datetime.now(timezone.utc)
+    cst_now = utc_now - timedelta(hours=6)
+    return cst_now.strftime('%Y-%m-%d')
 
 # --- LÓGICA DE CONTROL DE LÍMITES E INCREMENTO DE USO ---
 async def check_chat_limit(user_id: str, plan: str):
