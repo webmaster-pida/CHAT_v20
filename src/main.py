@@ -475,14 +475,44 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             promos = stripe.PromotionCode.list(code=user_promo_code, active=True, limit=1)
             if promos.data: promo_id = promos.data[0].id
             else: raise HTTPException(status_code=400, detail=f"El código de descuento '{user_promo_code}' no es válido o ha expirado.")
-        existing_customers = stripe.Customer.list(email=user_email, limit=1)
-        if existing_customers and len(existing_customers.data) > 0:
-            customer = existing_customers.data[0]
-            if customer_name and not customer.name: stripe.Customer.modify(customer.id, name=customer_name)
-        else:
+        # --- LÓGICA DE ESPERA INTELIGENTE (POLLING) PARA EVITAR DUPLICADOS ---
+        customer = None
+        attempts = 0
+        max_attempts = 4 # Intentaremos 4 veces (aprox 3.2 seg total)
+
+        while attempts < max_attempts and not customer:
+            # 1. Búsqueda por UID (Metadata) - La más segura
+            search_query = f"metadata['firebaseUID']:'{uid}' OR metadata['uid']:'{uid}'"
+            try:
+                search_result = stripe.Customer.search(query=search_query, limit=1)
+                if search_result.data:
+                    customer = search_result.data[0]
+                    break 
+            except Exception: pass
+
+            # 2. Búsqueda por Email (Fallback)
+            try:
+                existing_customers = stripe.Customer.list(email=user_email, limit=1)
+                if existing_customers.data:
+                    customer = existing_customers.data[0]
+                    break
+            except Exception: pass
+
+            attempts += 1
+            if attempts < max_attempts:
+                # Esperamos 0.8s para dar tiempo a la extensión de Firebase
+                await asyncio.sleep(0.8) 
+
+        # Si tras la espera no existe, lo creamos
+        if not customer:
+            log.info(f"Cliente no encontrado tras espera. Creando nuevo cliente para {user_email}")
             customer_args = {"email": user_email, "metadata": {"uid": uid}}
             if customer_name: customer_args["name"] = customer_name
             customer = stripe.Customer.create(**customer_args)
+        else:
+            # Si ya existía, actualizamos el nombre si cambió
+            if customer_name and customer.name != customer_name:
+                stripe.Customer.modify(customer.id, name=customer_name)
         subscription = stripe.Subscription.create(
             customer=customer.id,
             items=[{'price': price_id}],
