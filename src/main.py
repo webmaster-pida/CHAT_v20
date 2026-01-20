@@ -470,6 +470,53 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
         trial_days = int(data.get("trial_period_days", 0))
         customer_name = data.get("name", "") 
         user_promo_code = data.get("promotion_code", "").strip()
+        # La extensión de Firebase puede tardar. Intentamos buscar antes de crear.
+        customer = None
+        attempts = 0
+        max_attempts = 5 # Aumentamos a 5 intentos (aprox 4 seg total) para dar más margen
+
+        while attempts < max_attempts and not customer:
+            # 1. Búsqueda por UID (Metadata) - La más segura
+            search_query = f"metadata['firebaseUID']:'{uid}' OR metadata['uid']:'{uid}'"
+            try:
+                search_result = stripe.Customer.search(query=search_query, limit=1)
+                if search_result.data:
+                    customer = search_result.data[0]
+                    break 
+            except Exception: pass
+
+            # 2. Búsqueda por Email (Fallback instantáneo)
+            try:
+                existing_customers = stripe.Customer.list(email=user_email, limit=1)
+                if existing_customers.data:
+                    customer = existing_customers.data[0]
+                    break
+            except Exception: pass
+
+            attempts += 1
+            if attempts < max_attempts:
+                # Esperamos 0.8s entre intentos
+                await asyncio.sleep(0.8) 
+
+        # --- CREACIÓN O ACTUALIZACIÓN ---
+        if not customer:
+            log.info(f"Cliente no encontrado tras espera. Creando nuevo cliente para {user_email}")
+            customer_args = {"email": user_email, "metadata": {"uid": uid, "firebaseUID": uid}}
+            if customer_name: customer_args["name"] = customer_name
+            customer = stripe.Customer.create(**customer_args)
+        else:
+            # Si ya existía, actualizamos nombre si es necesario
+            if customer_name and customer.name != customer_name:
+                stripe.Customer.modify(customer.id, name=customer_name)
+
+        # ¡¡CRUCIAL!!: Sincronizar Firestore con el cliente que VAMOS a usar para cobrar.
+        # Esto asegura que el ID del pago coincida con el ID en tu base de datos.
+        try:
+            await db.collection("customers").document(uid).set(
+                {"stripeId": customer.id, "email": user_email}, merge=True
+            )
+        except Exception as e:
+            log.error(f"Error sincronizando ID en Firestore: {e}")
         promo_id = None
         if user_promo_code:
             promos = stripe.PromotionCode.list(code=user_promo_code, active=True, limit=1)
