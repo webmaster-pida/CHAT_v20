@@ -641,37 +641,3 @@ async def create_portal_session(request: Request, current_user: Dict[str, Any] =
     except Exception as e:
         log.error(f"Error generando sesión del portal: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-# --- NUEVO ENDPOINT PARA VALIDAR CUPONES ---
-@app.post("/validate-coupon", tags=["Billing"])
-async def validate_coupon(data: Dict[str, Any]):
-    code = data.get("promotion_code", "").strip()
-    price_id = data.get("price_id") # Para verificar si el cupón aplica a este plan
-    
-    if not code:
-        raise HTTPException(status_code=400, detail="Código no proporcionado")
-
-    try:
-        # Buscamos el código de promoción activo en Stripe
-        promos = stripe.PromotionCode.list(code=code, active=True, limit=1)
-        
-        if not promos.data:
-            return {"valid": False, "message": "Código inválido o expirado"}
-
-        promo = promos.data[0]
-        coupon = promo.coupon
-
-        # Extraer el beneficio
-        discount_data = {
-            "valid": True,
-            "promotion_code_id": promo.id,
-            "percent_off": coupon.percent_off,
-            "amount_off": coupon.amount_off / 100 if coupon.amount_off else None,
-            "currency": coupon.currency
-        }
-        
-        return discount_data
-
-    except Exception as e:
-        log.error(f"Error validando cupón: {e}")
-        raise HTTPException(status_code=500, detail="Error al validar el cupón")
