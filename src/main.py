@@ -471,96 +471,34 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
         trial_days = int(data.get("trial_period_days", 0))
         customer_name = data.get("name", "") 
         user_promo_code = data.get("promotion_code", "").strip()
-        # La extensión de Firebase puede tardar. Intentamos buscar antes de crear.
+
         customer = None
-        attempts = 0
-        max_attempts = 5 # Aumentamos a 5 intentos (aprox 4 seg total) para dar más margen
-
-        while attempts < max_attempts and not customer:
-            # 1. Búsqueda por UID (Metadata) - La más segura
-            search_query = f"metadata['firebaseUID']:'{uid}' OR metadata['uid']:'{uid}'"
-            try:
-                search_result = stripe.Customer.search(query=search_query, limit=1)
-                if search_result.data:
-                    customer = search_result.data[0]
-                    break 
-            except Exception: pass
-
-            # 2. Búsqueda por Email (Fallback instantáneo)
-            try:
-                existing_customers = stripe.Customer.list(email=user_email, limit=1)
-                if existing_customers.data:
-                    customer = existing_customers.data[0]
-                    break
-            except Exception: pass
-
-            attempts += 1
-            if attempts < max_attempts:
-                # Esperamos 0.8s entre intentos
-                await asyncio.sleep(0.8) 
-
-        # --- CREACIÓN O ACTUALIZACIÓN ---
-        if not customer:
-            log.info(f"Cliente no encontrado tras espera. Creando nuevo cliente para {user_email}")
-            customer_args = {"email": user_email, "metadata": {"uid": uid, "firebaseUID": uid}}
-            if customer_name: customer_args["name"] = customer_name
-            customer = stripe.Customer.create(**customer_args)
+        # --- BÚSQUEDA DE CLIENTE (UN SOLO BLOQUE) ---
+        search_query = f"metadata['firebaseUID']:'{uid}' OR metadata['uid']:'{uid}'"
+        search_result = stripe.Customer.search(query=search_query, limit=1)
+        if search_result.data:
+            customer = search_result.data[0]
         else:
-            # Si ya existía, actualizamos nombre si es necesario
+            existing_customers = stripe.Customer.list(email=user_email, limit=1)
+            if existing_customers.data:
+                customer = existing_customers.data[0]
+
+        if not customer:
+            customer = stripe.Customer.create(
+                email=user_email, 
+                name=customer_name, 
+                metadata={"uid": uid, "firebaseUID": uid}
+            )
+        else:
             if customer_name and customer.name != customer_name:
                 stripe.Customer.modify(customer.id, name=customer_name)
 
-        # ¡¡CRUCIAL!!: Sincronizar Firestore con el cliente que VAMOS a usar para cobrar.
-        # Esto asegura que el ID del pago coincida con el ID en tu base de datos.
-        try:
-            await db.collection("customers").document(uid).set(
-                {"stripeId": customer.id, "email": user_email}, merge=True
-            )
-        except Exception as e:
-            log.error(f"Error sincronizando ID en Firestore: {e}")
         promo_id = None
         if user_promo_code:
             promos = stripe.PromotionCode.list(code=user_promo_code, active=True, limit=1)
             if promos.data: promo_id = promos.data[0].id
-            else: raise HTTPException(status_code=400, detail=f"El código de descuento '{user_promo_code}' no es válido o ha expirado.")
-        # --- LÓGICA DE ESPERA INTELIGENTE (POLLING) PARA EVITAR DUPLICADOS ---
-        customer = None
-        attempts = 0
-        max_attempts = 4 # Intentaremos 4 veces (aprox 3.2 seg total)
+            else: raise HTTPException(status_code=400, detail=f"Código inválido.")
 
-        while attempts < max_attempts and not customer:
-            # 1. Búsqueda por UID (Metadata) - La más segura
-            search_query = f"metadata['firebaseUID']:'{uid}' OR metadata['uid']:'{uid}'"
-            try:
-                search_result = stripe.Customer.search(query=search_query, limit=1)
-                if search_result.data:
-                    customer = search_result.data[0]
-                    break 
-            except Exception: pass
-
-            # 2. Búsqueda por Email (Fallback)
-            try:
-                existing_customers = stripe.Customer.list(email=user_email, limit=1)
-                if existing_customers.data:
-                    customer = existing_customers.data[0]
-                    break
-            except Exception: pass
-
-            attempts += 1
-            if attempts < max_attempts:
-                # Esperamos 0.8s para dar tiempo a la extensión de Firebase
-                await asyncio.sleep(0.8) 
-
-        # Si tras la espera no existe, lo creamos
-        if not customer:
-            log.info(f"Cliente no encontrado tras espera. Creando nuevo cliente para {user_email}")
-            customer_args = {"email": user_email, "metadata": {"uid": uid}}
-            if customer_name: customer_args["name"] = customer_name
-            customer = stripe.Customer.create(**customer_args)
-        else:
-            # Si ya existía, actualizamos el nombre si cambió
-            if customer_name and customer.name != customer_name:
-                stripe.Customer.modify(customer.id, name=customer_name)
         subscription = stripe.Subscription.create(
             customer=customer.id,
             items=[{'price': price_id}],
@@ -569,16 +507,18 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             payment_behavior='default_incomplete',
             payment_settings={'save_default_payment_method': 'on_subscription'},
             expand=['latest_invoice.payment_intent', 'pending_setup_intent'], 
-            metadata={"uid": uid, "email": user_email, "plan_key": plan_key, "trial_days": str(trial_days)}
+            metadata={"uid": uid, "plan_key": plan_key}
         )
-        if trial_days > 0 and subscription.pending_setup_intent: client_secret = subscription.pending_setup_intent.client_secret
-        else: client_secret = subscription.latest_invoice.payment_intent.client_secret
-        return {"subscriptionId": subscription.id, "clientSecret": client_secret}
-    except HTTPException as http_e: raise http_e
-    except Exception as e:
-        log.error(f"Error creando Suscripción: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
 
+        if trial_days > 0 and subscription.pending_setup_intent:
+            client_secret = subscription.pending_setup_intent.client_secret
+        else:
+            client_secret = subscription.latest_invoice.payment_intent.client_secret
+            
+        return {"subscriptionId": subscription.id, "clientSecret": client_secret}
+    except Exception as e:
+        log.error(f"Error Suscripción: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/stripe-webhook", tags=["Billing"])
 async def stripe_webhook(request: Request):
