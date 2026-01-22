@@ -560,6 +560,19 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             # Si ya existía, actualizamos el nombre si cambió
             if customer_name and customer.name != customer_name:
                 stripe.Customer.modify(customer.id, name=customer_name)
+
+        # 1. Configuramos el cliente para que el portal vea la tarjeta globalmente
+        # (Indentado a 8 espacios, alineado con el 'if/else' anterior)
+        stripe.Customer.modify(
+            customer.id,
+            invoice_settings={
+                'default_payment_method': None 
+            }
+        )
+
+        # 2. Creación de suscripción con el valor REQUERIDO 'on_subscription'
+        subscription = stripe.Subscription.create(
+                
         subscription = stripe.Subscription.create(
             customer=customer.id,
             items=[{'price': price_id}],
