@@ -524,60 +524,78 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
 async def stripe_webhook(request: Request):
     payload = await request.body()
     sig_header = request.headers.get("Stripe-Signature")
+    
     try:
+        # 1. Validar firma
         webhook_secret = settings.STRIPE_WEBHOOK_SECRET 
+        if not webhook_secret:
+            log.error("⚠️ STRIPE_WEBHOOK_SECRET no está configurado en las variables de entorno.")
+            return Response(content="Webhook secret missing", status_code=500)
+
         event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
         data_object = event['data']['object']
-        # Función auxiliar para identificar el plan
-        def resolve_plan(obj):
-            items = obj.get('items', {}).get('data', [])
-            if items:
-                p_id = items[0]['price']['id']
-                return STRIPE_PRICE_MAP.get(p_id, "basico")
-            return obj.get('metadata', {}).get('plan_key', "basico")
+        
+        log.info(f"📩 Webhook recibido: {event['type']}")
 
-        # 1. ACTUALIZACIÓN: El pago fue exitoso o cambió el estado de la suscripción
-        if event['type'] == 'customer.subscription.updated':
+        # 2. Procesar Suscripción (Creada o Actualizada)
+        if event['type'] in ['customer.subscription.created', 'customer.subscription.updated']:
             subscription = data_object
-            uid = subscription.get('metadata', {}).get('uid')
-            stripe_status = subscription.get('status') # active, trialing, incomplete, past_due...
+            # Extraer UID de metadata
+            metadata = subscription.get('metadata', {})
+            uid = metadata.get('uid')
+            stripe_status = subscription.get('status')
             
-            if uid:
-                # SOLO 'active' o 'trialing' activan el acceso. 
-                # Si es 'incomplete' (tarjeta falsa), se marcará como inactive.
-                is_valid = stripe_status in ['active', 'trialing']
-                current_plan = resolve_plan(subscription)
-                
-                await db.collection("customers").document(uid).set({
-                    "status": "active" if is_valid else "inactive",
-                    "plan": current_plan if is_valid else "none",
-                    "stripe_status": stripe_status,
-                    "updated_at": firestore.SERVER_TIMESTAMP
-                }, merge=True)
-                log.info(f"Webhook UPDATE: Usuario {uid} -> Staus: {stripe_status} (Acceso: {is_valid})")
+            if not uid:
+                log.warning(f"❓ Evento {event['type']} recibido sin UID en metadata. Ignorando.")
+                return {"status": "ignored", "reason": "no_uid"}
 
-        # 2. REVOCACIÓN: Pago fallido o suscripción eliminada
+            # Determinar el plan
+            items = subscription.get('items', {}).get('data', [])
+            plan_key = "basico"
+            if items:
+                price_id = items[0]['price']['id']
+                plan_key = STRIPE_PRICE_MAP.get(price_id, "basico")
+
+            # Actualizar Firestore
+            is_valid = stripe_status in ['active', 'trialing']
+            await db.collection("customers").document(uid).set({
+                "status": "active" if is_valid else "inactive",
+                "plan": plan_key if is_valid else "none",
+                "stripe_status": stripe_status,
+                "updated_at": firestore.SERVER_TIMESTAMP
+            }, merge=True)
+            log.info(f"✅ Usuario {uid} actualizado a {stripe_status} via Webhook.")
+
+        # 3. Procesar Cancelación o Fallo de Pago
         elif event['type'] in ['customer.subscription.deleted', 'invoice.payment_failed']:
             uid = data_object.get('metadata', {}).get('uid')
             
-            # Si el evento es de factura, buscamos el UID en la suscripción
+            # Si el UID no está en el objeto directo (común en facturas), buscarlo
             if not uid and data_object.get('subscription'):
                 try:
-                    sub_data = stripe.Subscription.retrieve(data_object['subscription'])
-                    uid = sub_data.get('metadata', {}).get('uid')
-                except Exception: uid = None
-            
+                    # Retrieve es síncrono, pero en este flujo está bien
+                    sub = stripe.Subscription.retrieve(data_object['subscription'])
+                    uid = sub.get('metadata', {}).get('uid')
+                except Exception as e:
+                    log.error(f"Error recuperando sub para UID: {e}")
+
             if uid:
                 await db.collection("customers").document(uid).set({
                     "status": "inactive",
                     "plan": "none",
                     "updated_at": firestore.SERVER_TIMESTAMP
                 }, merge=True)
-                log.warning(f"Webhook REVOKE: Acceso quitado a {uid} por {event['type']}")
+                log.warning(f"❌ Acceso revocado para {uid} debido a {event['type']}")
+
+        return {"status": "success"}
+
+    except stripe.error.SignatureVerificationError as e:
+        log.error(f"❌ Firma de Webhook inválida: {e}")
+        return Response(content="Invalid signature", status_code=400)
     except Exception as e:
-        log.error(f"Error procesando Webhook: {e}")
+        # ESTO ES LO QUE NOS DIRÁ EL ERROR REAL EN LOS LOGS
+        log.error(f"💥 Error crítico en Webhook: {str(e)}", exc_info=True)
         return Response(content=str(e), status_code=500)
-    return {"status": "success"}
 
 @app.post("/create-portal-session", tags=["Billing"])
 async def create_portal_session(request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
