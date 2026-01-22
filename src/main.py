@@ -202,9 +202,9 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
     try:
         user_doc = await db.collection("customers").document(user_id).get()
         user_data = user_doc.to_dict()
-            # Verificación estricta: debe estar activo y tener un plan asignado
-            if user_data.get("status") == "active" and user_data.get("plan") != "none":
-                return
+        # Verificación estricta: debe estar activo y tener un plan asignado
+        if user_data.get("status") == "active" and user_data.get("plan") != "none":
+            return
 
         subscriptions_ref = db.collection("customers").document(user_id).collection("subscriptions")
         query = subscriptions_ref.where("status", "in", ["active", "trialing"]).limit(1)
@@ -588,7 +588,7 @@ async def stripe_webhook(request: Request):
         webhook_secret = settings.STRIPE_WEBHOOK_SECRET 
         event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
         data_object = event['data']['object']
-    # Función auxiliar para identificar el plan
+        # Función auxiliar para identificar el plan
         def resolve_plan(obj):
             items = obj.get('items', {}).get('data', [])
             if items:
