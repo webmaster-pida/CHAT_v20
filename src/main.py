@@ -25,7 +25,7 @@ from src.core.security import get_current_user
 
 from google.cloud import firestore
 
-# MAPA DE TRADUCCIÓN: ID de Stripe -> Nombre del Plan interno
+# MAPA DE TRADUCCIÓN: ID de Stripe -> Nombre del Plan interno para que no se equivoque
 STRIPE_PRICE_MAP = {
     # BÁSICO
     "price_1SqFQiGgaloBN5L8U60ywohe": "basico", 
