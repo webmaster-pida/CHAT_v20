@@ -566,7 +566,7 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             trial_period_days=trial_days if trial_days > 0 else None,
             promotion_code=promo_id,
             payment_behavior='default_incomplete',
-            payment_settings={'save_default_payment_method': 'on_customer'},
+            payment_settings={'save_default_payment_method': 'on_subscription'},
             expand=['latest_invoice.payment_intent', 'pending_setup_intent'], 
             metadata={"uid": uid, "email": user_email, "plan_key": plan_key, "trial_days": str(trial_days)}
         )
