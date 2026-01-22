@@ -201,9 +201,10 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
 
     try:
         user_doc = await db.collection("customers").document(user_id).get()
-        if user_doc.exists:
-            user_data = user_doc.to_dict()
-            if user_data.get("status") == "active": return
+        user_data = user_doc.to_dict()
+            # Verificación estricta: debe estar activo y tener un plan asignado
+            if user_data.get("status") == "active" and user_data.get("plan") != "none":
+                return
 
         subscriptions_ref = db.collection("customers").document(user_id).collection("subscriptions")
         query = subscriptions_ref.where("status", "in", ["active", "trialing"]).limit(1)
@@ -587,39 +588,52 @@ async def stripe_webhook(request: Request):
         webhook_secret = settings.STRIPE_WEBHOOK_SECRET 
         event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
         data_object = event['data']['object']
-        uid = None
-        plan_key = None
-        def get_plan_from_obj(obj):
-            if 'items' in obj and 'data' in obj['items'] and len(obj['items']['data']) > 0:
-                current_price_id = obj['items']['data'][0]['price']['id']
-                if current_price_id in STRIPE_PRICE_MAP: return STRIPE_PRICE_MAP[current_price_id]
-            return obj.get('metadata', {}).get('plan_key')
-        if event['type'] in ['customer.subscription.created', 'customer.subscription.updated']:
+    # Función auxiliar para identificar el plan
+        def resolve_plan(obj):
+            items = obj.get('items', {}).get('data', [])
+            if items:
+                p_id = items[0]['price']['id']
+                return STRIPE_PRICE_MAP.get(p_id, "basico")
+            return obj.get('metadata', {}).get('plan_key', "basico")
+
+        # 1. ACTUALIZACIÓN: El pago fue exitoso o cambió el estado de la suscripción
+        if event['type'] == 'customer.subscription.updated':
+            subscription = data_object
+            uid = subscription.get('metadata', {}).get('uid')
+            stripe_status = subscription.get('status') # active, trialing, incomplete, past_due...
+            
+            if uid:
+                # SOLO 'active' o 'trialing' activan el acceso. 
+                # Si es 'incomplete' (tarjeta falsa), se marcará como inactive.
+                is_valid = stripe_status in ['active', 'trialing']
+                current_plan = resolve_plan(subscription)
+                
+                await db.collection("customers").document(uid).set({
+                    "status": "active" if is_valid else "inactive",
+                    "plan": current_plan if is_valid else "none",
+                    "stripe_status": stripe_status,
+                    "updated_at": firestore.SERVER_TIMESTAMP
+                }, merge=True)
+                log.info(f"Webhook UPDATE: Usuario {uid} -> Staus: {stripe_status} (Acceso: {is_valid})")
+
+        # 2. REVOCACIÓN: Pago fallido o suscripción eliminada
+        elif event['type'] in ['customer.subscription.deleted', 'invoice.payment_failed']:
             uid = data_object.get('metadata', {}).get('uid')
-            plan_key = get_plan_from_obj(data_object)
-            status = data_object.get('status')
-            if status in ['active', 'trialing']:
-                if uid and plan_key:
-                    await db.collection("customers").document(uid).set({
-                        "status": "active",
-                        "stripe_subscription_id": data_object.get('id'),
-                        "plan": plan_key,
-                        "updated_at": firestore.SERVER_TIMESTAMP
-                    }, merge=True)
-                    log.info(f"Suscripción actualizada para {uid}: Plan {plan_key} ({status})")
-        elif event['type'] == 'invoice.payment_succeeded':
-            subscription_id = data_object.get('subscription')
-            if subscription_id:
-                sub = stripe.Subscription.retrieve(subscription_id)
-                uid = sub.get('metadata', {}).get('uid')
-                plan_key = get_plan_from_obj(sub)
-                if uid and plan_key:
-                    await db.collection("customers").document(uid).set({
-                        "status": "active",
-                        "stripe_subscription_id": subscription_id,
-                        "plan": plan_key,
-                        "updated_at": firestore.SERVER_TIMESTAMP
-                    }, merge=True)
+            
+            # Si el evento es de factura, buscamos el UID en la suscripción
+            if not uid and data_object.get('subscription'):
+                try:
+                    sub_data = stripe.Subscription.retrieve(data_object['subscription'])
+                    uid = sub_data.get('metadata', {}).get('uid')
+                except Exception: uid = None
+            
+            if uid:
+                await db.collection("customers").document(uid).set({
+                    "status": "inactive",
+                    "plan": "none",
+                    "updated_at": firestore.SERVER_TIMESTAMP
+                }, merge=True)
+                log.warning(f"Webhook REVOKE: Acceso quitado a {uid} por {event['type']}")
     except Exception as e:
         log.error(f"Error procesando Webhook: {e}")
         return Response(content=str(e), status_code=500)
