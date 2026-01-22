@@ -28,21 +28,21 @@ from google.cloud import firestore
 # MAPA DE TRADUCCIÓN: ID de Stripe -> Nombre del Plan interno
 STRIPE_PRICE_MAP = {
     # BÁSICO
-    "price_1SqbBOGaDEQrzamxiuEbXIcc": "basico", 
-    "price_1SqFSFGgaloBN5L8BMBeRPqb": "basico", 
+    "price_1SqFQiGgaloBN5L8U60ywohe": "basico", 
     "price_1SqFSFGgaloBN5L8kxegWZqC": "basico", 
+    "price_1SqFSFGgaloBN5L8BMBeRPqb": "basico", 
     "price_1SqFSyGgaloBN5L8rrwrtUau": "basico", 
     
     # AVANZADO
-    "price_1SqbD8GaDEQrzamxuV9SQbFB": "avanzado",
-    "price_1SqFWJGgaloBN5L8roECNay2": "avanzado",
+    "price_1SqFUvGgaloBN5L8xOBssn6E": "avanzado",
     "price_1SqFWJGgaloBN5L8VKhkzLRH": "avanzado",
+    "price_1SqFWJGgaloBN5L8roECNay2": "avanzado",
     "price_1SqFWJGgaloBN5L8hKpEvd1v": "avanzado",
 
     # PREMIUM
-    "price_1SqbDcGaDEQrzamxdcvIy0BG": "premium",
-    "price_1SqFadGgaloBN5L8AwTUeTSd": "premium",
+    "price_1SqFXIGgaloBN5L8vaGyleDT": "premium",
     "price_1SqFadGgaloBN5L86iwNYm1c": "premium",
+    "price_1SqFadGgaloBN5L8AwTUeTSd": "premium",
     "price_1SqFadGgaloBN5L8QFHXe1i9": "premium",
 }
 
