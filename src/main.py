@@ -562,7 +562,6 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
                 stripe.Customer.modify(customer.id, name=customer_name)
 
         # 1. Configuramos el cliente para que el portal vea la tarjeta globalmente
-        # (Indentado a 8 espacios, alineado con el 'if/else' anterior)
         stripe.Customer.modify(
             customer.id,
             invoice_settings={
@@ -570,9 +569,7 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             }
         )
 
-        # 2. Creación de suscripción con el valor REQUERIDO 'on_subscription'
-        subscription = stripe.Subscription.create(
-                
+        # 2. Creación de suscripción (SOLO UNA VEZ y con cierre correcto)
         subscription = stripe.Subscription.create(
             customer=customer.id,
             items=[{'price': price_id}],
@@ -581,7 +578,12 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             payment_behavior='default_incomplete',
             payment_settings={'save_default_payment_method': 'on_subscription'},
             expand=['latest_invoice.payment_intent', 'pending_setup_intent'], 
-            metadata={"uid": uid, "email": user_email, "plan_key": plan_key, "trial_days": str(trial_days)}
+            metadata={
+                "uid": uid, 
+                "email": user_email, 
+                "plan_key": plan_key, 
+                "trial_days": str(trial_days)
+            }
         )
         if trial_days > 0 and subscription.pending_setup_intent: client_secret = subscription.pending_setup_intent.client_secret
         else: client_secret = subscription.latest_invoice.payment_intent.client_secret
