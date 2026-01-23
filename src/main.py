@@ -201,17 +201,13 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
 
     try:
         user_doc = await db.collection("customers").document(user_id).get()
-        user_data = user_doc.to_dict()
-        # Verificación estricta: debe estar activo y tener un plan asignado
-        if user_data.get("status") == "active" and user_data.get("plan") != "none":
-            return
-
-        subscriptions_ref = db.collection("customers").document(user_id).collection("subscriptions")
-        query = subscriptions_ref.where("status", "in", ["active", "trialing"]).limit(1)
-        results = [doc async for doc in query.stream()]
-        
-        if not results:
-            raise HTTPException(status_code=403, detail="No tienes una suscripción activa.")
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            # Validación única basada en el Webhook (Cierra el bypass de la extensión)
+            if user_data.get("status") == "active":
+                return 
+        # Si no es activo, lanzamos el error 403 inmediatamente
+        raise HTTPException(status_code=403, detail="Suscripción inválida o sin método de pago.")
     except HTTPException as http_exc: raise http_exc
     except Exception as e:
         log.error(f"Error verificando suscripción DB: {e}")
@@ -544,7 +540,10 @@ async def stripe_webhook(request: Request):
             metadata = subscription.get('metadata', {})
             uid = metadata.get('uid')
             stripe_status = subscription.get('status')
-            
+            # Verificación de seguridad: ¿Stripe tiene una tarjeta vinculada a esta suscripción?
+            has_payment_method = subscription.get('default_payment_method') is not None or \
+                                 subscription.get('default_source') is not None
+
             if not uid:
                 log.warning(f"❓ Evento {event['type']} recibido sin UID en metadata. Ignorando.")
                 return {"status": "ignored", "reason": "no_uid"}
@@ -556,15 +555,16 @@ async def stripe_webhook(request: Request):
                 price_id = items[0]['price']['id']
                 plan_key = STRIPE_PRICE_MAP.get(price_id, "basico")
 
-            # Actualizar Firestore
-            is_valid = stripe_status in ['active', 'trialing']
+            # SOLO activamos si el status es active/trialing Y tiene una tarjeta real vinculada
+            is_valid = (stripe_status in ['active', 'trialing']) and has_payment_method
             await db.collection("customers").document(uid).set({
                 "status": "active" if is_valid else "inactive",
                 "plan": plan_key if is_valid else "none",
                 "stripe_status": stripe_status,
+                "has_valid_card": has_payment_method,
                 "updated_at": firestore.SERVER_TIMESTAMP
             }, merge=True)
-            log.info(f"✅ Usuario {uid} actualizado a {stripe_status} via Webhook.")
+            log.info(f"🛡️ Seguridad: Usuario {uid} -> Status: {stripe_status}, Tarjeta: {has_payment_method} -> Acceso: {is_valid}")
 
         # 3. Procesar Cancelación o Fallo de Pago
         elif event['type'] in ['customer.subscription.deleted', 'invoice.payment_failed']:
