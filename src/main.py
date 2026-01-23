@@ -201,13 +201,14 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
 
     try:
         user_doc = await db.collection("customers").document(user_id).get()
-        if user_doc.exists:
-            user_data = user_doc.to_dict()
-            # Validación única basada en el Webhook (Cierra el bypass de la extensión)
-            if user_data.get("status") == "active":
-                return 
-        # Si no es activo, lanzamos el error 403 inmediatamente
-        raise HTTPException(status_code=403, detail="Suscripción inválida o sin método de pago.")
+        if user_doc.exists and user_doc.to_dict().get("status") == "active":
+            return # Único punto de entrada permitido
+        
+        raise HTTPException(status_code=403, detail="Suscripción inactiva o requiere tarjeta válida.")
+    except HTTPException as e: raise e
+    except Exception as e:
+        log.error(f"Error Verificación: {e}")
+        raise HTTPException(status_code=500, detail="Error de servidor.")
     except HTTPException as http_exc: raise http_exc
     except Exception as e:
         log.error(f"Error verificando suscripción DB: {e}")
@@ -533,59 +534,42 @@ async def stripe_webhook(request: Request):
         
         log.info(f"📩 Webhook recibido: {event['type']}")
 
-        # 2. Procesar Suscripción (Creada o Actualizada)
+        def resolve_plan(sub_obj):
+            items = sub_obj.get('items', {}).get('data', [])
+            p_id = items[0]['price']['id'] if items else None
+            return STRIPE_PRICE_MAP.get(p_id, "basico")
+
         if event['type'] in ['customer.subscription.created', 'customer.subscription.updated']:
             subscription = data_object
-            # Extraer UID de metadata
-            metadata = subscription.get('metadata', {})
-            uid = metadata.get('uid')
+            uid = subscription.get('metadata', {}).get('uid')
             stripe_status = subscription.get('status')
-            # Verificación de seguridad: ¿Stripe tiene una tarjeta vinculada a esta suscripción?
-            has_payment_method = subscription.get('default_payment_method') is not None or \
-                                 subscription.get('default_source') is not None
-
-            if not uid:
-                log.warning(f"❓ Evento {event['type']} recibido sin UID en metadata. Ignorando.")
-                return {"status": "ignored", "reason": "no_uid"}
-
-            # Determinar el plan
-            items = subscription.get('items', {}).get('data', [])
-            plan_key = "basico"
-            if items:
-                price_id = items[0]['price']['id']
-                plan_key = STRIPE_PRICE_MAP.get(price_id, "basico")
-
-            # SOLO activamos si el status es active/trialing Y tiene una tarjeta real vinculada
-            is_valid = (stripe_status in ['active', 'trialing']) and has_payment_method
-            await db.collection("customers").document(uid).set({
-                "status": "active" if is_valid else "inactive",
-                "plan": plan_key if is_valid else "none",
-                "stripe_status": stripe_status,
-                "has_valid_card": has_payment_method,
-                "updated_at": firestore.SERVER_TIMESTAMP
-            }, merge=True)
-            log.info(f"🛡️ Seguridad: Usuario {uid} -> Status: {stripe_status}, Tarjeta: {has_payment_method} -> Acceso: {is_valid}")
-
-        # 3. Procesar Cancelación o Fallo de Pago
-        elif event['type'] in ['customer.subscription.deleted', 'invoice.payment_failed']:
-            uid = data_object.get('metadata', {}).get('uid')
             
-            # Si el UID no está en el objeto directo (común en facturas), buscarlo
-            if not uid and data_object.get('subscription'):
-                try:
-                    # Retrieve es síncrono, pero en este flujo está bien
-                    sub = stripe.Subscription.retrieve(data_object['subscription'])
-                    uid = sub.get('metadata', {}).get('uid')
-                except Exception as e:
-                    log.error(f"Error recuperando sub para UID: {e}")
-
+            # CRÍTICO: Una suscripción solo es válida si Stripe confirma el pago/trial 
+            # Y existe un método de pago vinculado (evita el bypass de tarjetas falsas)
+            has_pm = subscription.get('default_payment_method') is not None or \
+                     subscription.get('default_source') is not None
+            
             if uid:
+                is_active = (stripe_status in ['active', 'trialing']) and has_pm
+                
                 await db.collection("customers").document(uid).set({
-                    "status": "inactive",
-                    "plan": "none",
+                    "status": "active" if is_active else "inactive",
+                    "plan": resolve_plan(subscription) if is_active else "none",
+                    "stripe_status": stripe_status,
                     "updated_at": firestore.SERVER_TIMESTAMP
                 }, merge=True)
-                log.warning(f"❌ Acceso revocado para {uid} debido a {event['type']}")
+                log.info(f"🛡️ Webhook: {uid} set to {'active' if is_active else 'inactive'} ({stripe_status})")
+
+        elif event['type'] in ['customer.subscription.deleted', 'invoice.payment_failed']:
+            uid = data_object.get('metadata', {}).get('uid')
+            if not uid and data_object.get('subscription'):
+                sub = stripe.Subscription.retrieve(data_object['subscription'])
+                uid = sub.get('metadata', {}).get('uid')
+            
+            if uid:
+                await db.collection("customers").document(uid).set({
+                    "status": "inactive", "plan": "none", "updated_at": firestore.SERVER_TIMESTAMP
+                }, merge=True)
 
         return {"status": "success"}
 
