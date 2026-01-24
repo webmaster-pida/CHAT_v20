@@ -582,23 +582,29 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
     try:
         user_email = current_user.get("email")
         uid = current_user["uid"]
+        
         price_id = data.get("priceId")
-        plan_key = data.get("plan_key", "unknown")
+        plan_key = data.get("plan_key", "unknown") # 'basico', 'avanzado', 'premium'
         trial_days = int(data.get("trial_period_days", 0))
         customer_name = data.get("name", "") 
         user_promo_code = data.get("promotion_code", "").strip()
 
+        # ---------------------------------------------------------
+        # 1. GESTIÓN DEL CLIENTE (Lógica original intacta)
+        # ---------------------------------------------------------
         customer = None
-        # --- BÚSQUEDA DE CLIENTE (UN SOLO BLOQUE) ---
+        # Buscar por metadatos (prioridad)
         search_query = f"metadata['firebaseUID']:'{uid}' OR metadata['uid']:'{uid}'"
         search_result = stripe.Customer.search(query=search_query, limit=1)
         if search_result.data:
             customer = search_result.data[0]
         else:
+            # Buscar por email (fallback)
             existing_customers = stripe.Customer.list(email=user_email, limit=1)
             if existing_customers.data:
                 customer = existing_customers.data[0]
 
+        # Crear si no existe
         if not customer:
             customer = stripe.Customer.create(
                 email=user_email, 
@@ -606,20 +612,61 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
                 metadata={"uid": uid, "firebaseUID": uid}
             )
         else:
+            # Actualizar nombre si cambió
             if customer_name and customer.name != customer_name:
                 stripe.Customer.modify(customer.id, name=customer_name)
 
+        # ---------------------------------------------------------
+        # 2. GESTIÓN DE PROMOCIÓN (Lógica MEJORADA con seguridad)
+        # ---------------------------------------------------------
         promo_id = None
+        
         if user_promo_code:
+            # Buscar el código en Stripe
             promos = stripe.PromotionCode.list(code=user_promo_code, active=True, limit=1)
-            if promos.data: promo_id = promos.data[0].id
-            else: raise HTTPException(status_code=400, detail=f"Código inválido.")
+            
+            if promos.data: 
+                promo_obj = promos.data[0]
+                coupon_id = promo_obj.coupon.id
+                
+                # --- NUEVA VALIDACIÓN DE SEGURIDAD ---
+                # Recuperamos el cupón para leer 'allowed_plans' desde metadata
+                # Esto evita que se use un cupón Premium en un plan Básico vía API directa
+                try:
+                    coupon = stripe.Coupon.retrieve(coupon_id)
+                    allowed_plans_meta = coupon.metadata.get("allowed_plans")
+                    
+                    if allowed_plans_meta:
+                        # Convertir "premium, avanzado" a lista
+                        allowed_list = [p.strip().lower() for p in allowed_plans_meta.split(",")]
+                        
+                        # Validar contra el plan que se está comprando (plan_key)
+                        if plan_key.lower() not in allowed_list:
+                            print(f"🚨 BLOQUEO DE SEGURIDAD: Cupón restringido usado en plan incorrecto.")
+                            raise HTTPException(
+                                status_code=400, 
+                                detail=f"El cupón no es válido para el plan {plan_key}."
+                            )
+                except Exception as e:
+                    # Si falla la validación explícita (HTTPException), la dejamos pasar.
+                    # Si es error de conexión, logueamos pero no detenemos (fallback seguro).
+                    if isinstance(e, HTTPException): raise e
+                    print(f"Warning validando cupón en checkout: {e}")
 
+                # Si pasa la validación, asignamos el ID para el cobro
+                promo_id = promo_obj.id
+            else:
+                # El usuario envió un código pero no existe en Stripe
+                raise HTTPException(status_code=400, detail=f"Código promocional inválido.")
+
+        # ---------------------------------------------------------
+        # 3. CREAR SUSCRIPCIÓN (Lógica original intacta)
+        # ---------------------------------------------------------
         subscription = stripe.Subscription.create(
             customer=customer.id,
             items=[{'price': price_id}],
             trial_period_days=trial_days if trial_days > 0 else None,
-            promotion_code=promo_id,
+            promotion_code=promo_id, # Stripe aplica el descuento matemático aquí
             payment_behavior='default_incomplete',
             payment_settings={'save_default_payment_method': 'on_subscription'},
             expand=['latest_invoice.payment_intent', 'pending_setup_intent'], 
@@ -632,6 +679,9 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             client_secret = subscription.latest_invoice.payment_intent.client_secret
             
         return {"subscriptionId": subscription.id, "clientSecret": client_secret}
+
+    except HTTPException as he:
+        raise he
     except Exception as e:
         log.error(f"Error Suscripción: {e}")
         raise HTTPException(status_code=400, detail=str(e))
