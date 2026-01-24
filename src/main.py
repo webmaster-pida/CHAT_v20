@@ -460,47 +460,63 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
 
 @app.post("/validate-promo-code", tags=["Billing"])
 async def validate_promo_code(request: Request):
+    """
+    Valida un cupón de Stripe y calcula el precio final dinámicamente.
+    """
     try:
         data = await request.json()
         promo_code = data.get("code", "").strip()
         price_id = data.get("priceId")
 
         if not promo_code or not price_id:
-            raise HTTPException(status_code=400, detail="Faltan datos requeridos.")
+            raise HTTPException(status_code=400, detail="Faltan datos requeridos (código o ID de precio).")
 
         # 1. Buscar el código de promoción en Stripe
-        # 'active=True' asegura que el código pueda usarse.
+        # Usamos 'active=True' para asegurarnos de que sea válido.
         promos = stripe.PromotionCode.list(code=promo_code, active=True, limit=1)
         
         if not promos.data:
-            raise HTTPException(status_code=404, detail="Código no válido o expirado.")
+            # Si Stripe devuelve lista vacía, el código no existe o expiró.
+            # Retornamos 404 explícito con mensaje claro.
+            raise HTTPException(status_code=404, detail="El código promocional no es válido o ha expirado.")
 
         promo = promos.data[0]
         coupon = promo.coupon
 
-        # 2. Obtener detalles del precio original para calcular el total final
-        price_obj = stripe.Price.retrieve(price_id)
-        original_amount = price_obj.unit_amount # En centavos (ej: 1999)
+        # Validar si el cupón tiene restricciones de producto/cliente si aplicara
+        # (Stripe lo maneja internamente en el checkout, pero aquí validamos existencia básica)
+
+        # 2. Obtener detalles del precio original
+        try:
+            price_obj = stripe.Price.retrieve(price_id)
+        except Exception as e:
+             raise HTTPException(status_code=400, detail="El plan seleccionado no es válido en Stripe.")
+
+        original_amount = price_obj.unit_amount # Monto en centavos (ej: 1999 para $19.99)
         currency = price_obj.currency.upper()
 
-        # 3. Calcular descuento
+        # 3. Calcular el descuento matemáticamente
         final_amount = original_amount
         discount_desc = ""
 
         if coupon.percent_off:
+            # Descuento porcentual
             discount_amount = int(original_amount * (coupon.percent_off / 100))
             final_amount = original_amount - discount_amount
             discount_desc = f"-{coupon.percent_off}%"
+        
         elif coupon.amount_off:
-            # Verificar que la moneda del cupón coincida
+            # Descuento de monto fijo
+            # Validar moneda del cupón vs moneda del plan
             if coupon.currency.upper() != currency:
-                raise HTTPException(status_code=400, detail=f"Este cupón no es válido para pagos en {currency}.")
+                raise HTTPException(status_code=400, detail=f"El cupón es para {coupon.currency.upper()}, no para {currency}.")
             
             final_amount = original_amount - coupon.amount_off
             discount_desc = f"-${coupon.amount_off / 100:.2f} {currency}"
 
-        # Evitar negativos
-        if final_amount < 0: final_amount = 0
+        # Evitar montos negativos
+        if final_amount < 0: 
+            final_amount = 0
 
         return {
             "valid": True,
@@ -509,14 +525,16 @@ async def validate_promo_code(request: Request):
             "final_amount": final_amount,
             "currency": currency,
             "description": discount_desc,
-            "coupon_name": coupon.name or promo.code
+            "coupon_name": coupon.name or promo.code,
+            "promo_id": promo.id # Devolvemos el ID real para usarlo en el checkout si se requiere
         }
 
     except HTTPException as he:
         raise he
     except Exception as e:
         log.error(f"Error validando promo: {e}")
-        raise HTTPException(status_code=500, detail="Error al validar el código.")
+        # Retornamos 500 solo si es un error de servidor no controlado
+        raise HTTPException(status_code=500, detail=f"Error interno validando el código: {str(e)}")
 
 @app.post("/create-payment-intent", tags=["Billing"])
 async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, Any] = Depends(get_current_user)):
