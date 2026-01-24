@@ -461,8 +461,8 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
 @app.post("/validate-promo-code", tags=["Billing"])
 async def validate_promo_code(request: Request):
     """
-    Valida un cupón de Stripe, verifica si aplica al producto seleccionado 
-    y calcula el precio final con redondeo preciso.
+    Valida un cupón de Stripe, verifica restricciones de producto (applies_to)
+    de forma segura y calcula el precio final.
     """
     try:
         data = await request.json()
@@ -490,21 +490,28 @@ async def validate_promo_code(request: Request):
         original_amount = price_obj.unit_amount 
         currency = price_obj.currency.upper()
         
-        # --- NUEVA VALIDACIÓN: RESTRICCIÓN DE PRODUCTO ---
-        # Obtenemos el ID del producto asociado a este precio (ej: prod_Premium123)
+        # -------------------------------------------------------------
+        # VALIDACIÓN DE PRODUCTO (METODO SEGURO .get)
+        # -------------------------------------------------------------
+        # Obtenemos el ID del producto que el usuario quiere comprar
         current_product_id = price_obj.product 
 
-        # Verificamos si el cupón tiene restricciones de 'applies_to'
-        if coupon.applies_to and coupon.applies_to.get("products"):
-            allowed_products = coupon.applies_to["products"]
+        # Usamos .get() para leer 'applies_to'. 
+        # Si no existe restricciones, devuelve None y NO rompe el código.
+        applies_to = coupon.get("applies_to")
+
+        if applies_to:
+            # Si entramos aquí, es porque el cupón SÍ tiene restricciones.
+            allowed_products = applies_to.get("products", [])
             
-            # Si el producto del plan actual NO está en la lista permitida del cupón
-            if current_product_id not in allowed_products:
+            # Si hay una lista de productos permitidos y el nuestro no está ahí:
+            if allowed_products and current_product_id not in allowed_products:
                 raise HTTPException(
                     status_code=400, 
                     detail="Este código no es válido para el plan seleccionado."
                 )
-        # -------------------------------------------------
+        # Si applies_to es None, el código pasa (el cupón es válido para todo).
+        # -------------------------------------------------------------
 
         # 3. Calcular el descuento matemáticamente
         final_amount = original_amount
@@ -517,7 +524,6 @@ async def validate_promo_code(request: Request):
             discount_desc = f"-{coupon.percent_off}%"
         
         elif coupon.amount_off:
-            # Validación de moneda
             if coupon.currency.upper() != currency:
                 raise HTTPException(status_code=400, detail=f"El cupón es para {coupon.currency.upper()}, no para {currency}.")
             
@@ -542,6 +548,7 @@ async def validate_promo_code(request: Request):
         raise he
     except Exception as e:
         log.error(f"Error validando promo: {e}")
+        # Al usar .get(), este error 500 ya no debería aparecer por culpa de applies_to
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 @app.post("/create-payment-intent", tags=["Billing"])
