@@ -2,7 +2,7 @@
 
 import vertexai
 import asyncio 
-from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig, Tool, GoogleSearchRetrieval
+from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig
 from typing import List, AsyncGenerator
 from src.config import settings, log
 from src.models.chat_models import ChatMessage
@@ -49,8 +49,8 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
         chat = model.start_chat(history=history)
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
-        # Configurar herramienta de Grounding con Google Search
-        google_search_tool = Tool.from_google_search_retrieval(google_search_retrieval=GoogleSearchRetrieval())
+        # Herramienta GA: Usamos el submódulo 'grounding' para evitar 'preview'
+        google_search_tool = Tool.from_google_search_retrieval(grounding.GoogleSearchRetrieval())
 
         # --- SOLUCIÓN: Usar el método async nativo ---
         response_stream = await chat.send_message_async(
