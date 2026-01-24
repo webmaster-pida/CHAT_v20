@@ -461,7 +461,8 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
 @app.post("/validate-promo-code", tags=["Billing"])
 async def validate_promo_code(request: Request):
     """
-    Valida un cupón de Stripe y calcula el precio final dinámicamente con redondeo preciso.
+    Valida un cupón de Stripe, verifica si aplica al producto seleccionado 
+    y calcula el precio final con redondeo preciso.
     """
     try:
         data = await request.json()
@@ -469,7 +470,7 @@ async def validate_promo_code(request: Request):
         price_id = data.get("priceId")
 
         if not promo_code or not price_id:
-            raise HTTPException(status_code=400, detail="Faltan datos requeridos (código o ID de precio).")
+            raise HTTPException(status_code=400, detail="Faltan datos requeridos.")
 
         # 1. Buscar el código de promoción en Stripe
         promos = stripe.PromotionCode.list(code=promo_code, active=True, limit=1)
@@ -480,37 +481,49 @@ async def validate_promo_code(request: Request):
         promo = promos.data[0]
         coupon = promo.coupon
 
-        # 2. Obtener detalles del precio original
+        # 2. Obtener detalles del precio original (Plan seleccionado)
         try:
             price_obj = stripe.Price.retrieve(price_id)
         except Exception as e:
              raise HTTPException(status_code=400, detail="El plan seleccionado no es válido en Stripe.")
 
-        original_amount = price_obj.unit_amount # Monto en centavos (ej: 2999 para $29.99)
+        original_amount = price_obj.unit_amount 
         currency = price_obj.currency.upper()
+        
+        # --- NUEVA VALIDACIÓN: RESTRICCIÓN DE PRODUCTO ---
+        # Obtenemos el ID del producto asociado a este precio (ej: prod_Premium123)
+        current_product_id = price_obj.product 
 
-        # 3. Calcular el descuento matemáticamente (CORREGIDO)
+        # Verificamos si el cupón tiene restricciones de 'applies_to'
+        if coupon.applies_to and coupon.applies_to.get("products"):
+            allowed_products = coupon.applies_to["products"]
+            
+            # Si el producto del plan actual NO está en la lista permitida del cupón
+            if current_product_id not in allowed_products:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Este código no es válido para el plan seleccionado."
+                )
+        # -------------------------------------------------
+
+        # 3. Calcular el descuento matemáticamente
         final_amount = original_amount
         discount_desc = ""
 
         if coupon.percent_off:
-            # Descuento porcentual
-            # CORRECCIÓN: Usamos round() antes de int() para evitar errores de centavos
-            # Ejemplo: 2999 * 0.3334 = 999.86 -> round sube a 1000. int solo truncaba a 999.
+            # Redondeo matemático correcto para coincidir con Stripe
             discount_amount = int(round(original_amount * (coupon.percent_off / 100)))
-            
             final_amount = original_amount - discount_amount
             discount_desc = f"-{coupon.percent_off}%"
         
         elif coupon.amount_off:
-            # Descuento de monto fijo
+            # Validación de moneda
             if coupon.currency.upper() != currency:
                 raise HTTPException(status_code=400, detail=f"El cupón es para {coupon.currency.upper()}, no para {currency}.")
             
             final_amount = original_amount - coupon.amount_off
             discount_desc = f"-${coupon.amount_off / 100:.2f} {currency}"
 
-        # Evitar montos negativos
         if final_amount < 0: 
             final_amount = 0
 
@@ -529,7 +542,7 @@ async def validate_promo_code(request: Request):
         raise he
     except Exception as e:
         log.error(f"Error validando promo: {e}")
-        raise HTTPException(status_code=500, detail=f"Error interno validando el código: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 @app.post("/create-payment-intent", tags=["Billing"])
 async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, Any] = Depends(get_current_user)):
