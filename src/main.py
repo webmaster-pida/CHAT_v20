@@ -461,27 +461,42 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
 @app.post("/validate-promo-code", tags=["Billing"])
 async def validate_promo_code(request: Request):
     """
-    Valida un cupón de Stripe, verifica restricciones de producto (applies_to)
-    de forma segura y calcula el precio final.
+    Valida un cupón recuperando explícitamente sus restricciones (applies_to)
+    desde Stripe para evitar que se aplique a productos incorrectos.
     """
     try:
         data = await request.json()
         promo_code = data.get("code", "").strip()
         price_id = data.get("priceId")
 
+        print(f"--- VALIDANDO CUPÓN ---")
+        print(f"Código: {promo_code} | Precio ID: {price_id}")
+
         if not promo_code or not price_id:
             raise HTTPException(status_code=400, detail="Faltan datos requeridos.")
 
-        # 1. Buscar el código de promoción en Stripe
+        # 1. Buscar el código de promoción
         promos = stripe.PromotionCode.list(code=promo_code, active=True, limit=1)
         
         if not promos.data:
             raise HTTPException(status_code=404, detail="El código promocional no es válido o ha expirado.")
 
-        promo = promos.data[0]
-        coupon = promo.coupon
+        # Obtenemos el objeto Promo y el ID del cupón
+        promo_obj = promos.data[0]
+        coupon_id = promo_obj.coupon.id
+        
+        # ---------------------------------------------------------------------
+        # PASO CRÍTICO: RECUPERACIÓN EXPLÍCITA DEL CUPÓN
+        # ---------------------------------------------------------------------
+        # No usamos promo_obj.coupon porque a veces viene incompleto.
+        # Hacemos una llamada extra a Stripe para traer las restricciones ('applies_to').
+        try:
+            coupon = stripe.Coupon.retrieve(coupon_id)
+        except Exception as e:
+            print(f"Error recuperando cupón {coupon_id}: {e}")
+            raise HTTPException(status_code=500, detail="Error validando las reglas del cupón.")
 
-        # 2. Obtener detalles del precio original (Plan seleccionado)
+        # 2. Obtener detalles del precio del PLAN seleccionado
         try:
             price_obj = stripe.Price.retrieve(price_id)
         except Exception as e:
@@ -490,35 +505,35 @@ async def validate_promo_code(request: Request):
         original_amount = price_obj.unit_amount 
         currency = price_obj.currency.upper()
         
-        # -------------------------------------------------------------
-        # VALIDACIÓN DE PRODUCTO (METODO SEGURO .get)
-        # -------------------------------------------------------------
-        # Obtenemos el ID del producto que el usuario quiere comprar
+        # 3. VALIDACIÓN DE RESTRICCIONES DE PRODUCTO
         current_product_id = price_obj.product 
-
-        # Usamos .get() para leer 'applies_to'. 
-        # Si no existe restricciones, devuelve None y NO rompe el código.
+        
+        # Ahora sí, 'coupon' tiene toda la data fresca
         applies_to = coupon.get("applies_to")
+        
+        print(f"Plan (Producto): {current_product_id}")
+        print(f"Restricciones del Cupón: {applies_to}")
 
         if applies_to:
-            # Si entramos aquí, es porque el cupón SÍ tiene restricciones.
             allowed_products = applies_to.get("products", [])
             
-            # Si hay una lista de productos permitidos y el nuestro no está ahí:
+            # Si el cupón tiene lista de productos y el nuestro NO está ahí
             if allowed_products and current_product_id not in allowed_products:
+                print(f"❌ BLOQUEADO: El producto {current_product_id} no está permitido.")
                 raise HTTPException(
                     status_code=400, 
                     detail="Este código no es válido para el plan seleccionado."
                 )
-        # Si applies_to es None, el código pasa (el cupón es válido para todo).
-        # -------------------------------------------------------------
+            else:
+                print("✅ Producto permitido.")
+        else:
+            print("ℹ️ Cupón sin restricciones de producto (Aplica a todo).")
 
-        # 3. Calcular el descuento matemáticamente
+        # 4. Cálculo matemático (con redondeo corregido)
         final_amount = original_amount
         discount_desc = ""
 
         if coupon.percent_off:
-            # Redondeo matemático correcto para coincidir con Stripe
             discount_amount = int(round(original_amount * (coupon.percent_off / 100)))
             final_amount = original_amount - discount_amount
             discount_desc = f"-{coupon.percent_off}%"
@@ -535,20 +550,20 @@ async def validate_promo_code(request: Request):
 
         return {
             "valid": True,
-            "code": promo.code,
+            "code": promo_obj.code,
             "original_amount": original_amount,
             "final_amount": final_amount,
             "currency": currency,
             "description": discount_desc,
-            "coupon_name": coupon.name or promo.code,
-            "promo_id": promo.id
+            "coupon_name": coupon.name or promo_obj.code,
+            "promo_id": promo_obj.id
         }
 
     except HTTPException as he:
         raise he
     except Exception as e:
         log.error(f"Error validando promo: {e}")
-        # Al usar .get(), este error 500 ya no debería aparecer por culpa de applies_to
+        print(f"EXCEPTION: {e}")
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 @app.post("/create-payment-intent", tags=["Billing"])
