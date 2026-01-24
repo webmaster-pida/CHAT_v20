@@ -461,7 +461,7 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
 @app.post("/validate-promo-code", tags=["Billing"])
 async def validate_promo_code(request: Request):
     """
-    Valida un cupón de Stripe y calcula el precio final dinámicamente.
+    Valida un cupón de Stripe y calcula el precio final dinámicamente con redondeo preciso.
     """
     try:
         data = await request.json()
@@ -472,19 +472,13 @@ async def validate_promo_code(request: Request):
             raise HTTPException(status_code=400, detail="Faltan datos requeridos (código o ID de precio).")
 
         # 1. Buscar el código de promoción en Stripe
-        # Usamos 'active=True' para asegurarnos de que sea válido.
         promos = stripe.PromotionCode.list(code=promo_code, active=True, limit=1)
         
         if not promos.data:
-            # Si Stripe devuelve lista vacía, el código no existe o expiró.
-            # Retornamos 404 explícito con mensaje claro.
             raise HTTPException(status_code=404, detail="El código promocional no es válido o ha expirado.")
 
         promo = promos.data[0]
         coupon = promo.coupon
-
-        # Validar si el cupón tiene restricciones de producto/cliente si aplicara
-        # (Stripe lo maneja internamente en el checkout, pero aquí validamos existencia básica)
 
         # 2. Obtener detalles del precio original
         try:
@@ -492,22 +486,24 @@ async def validate_promo_code(request: Request):
         except Exception as e:
              raise HTTPException(status_code=400, detail="El plan seleccionado no es válido en Stripe.")
 
-        original_amount = price_obj.unit_amount # Monto en centavos (ej: 1999 para $19.99)
+        original_amount = price_obj.unit_amount # Monto en centavos (ej: 2999 para $29.99)
         currency = price_obj.currency.upper()
 
-        # 3. Calcular el descuento matemáticamente
+        # 3. Calcular el descuento matemáticamente (CORREGIDO)
         final_amount = original_amount
         discount_desc = ""
 
         if coupon.percent_off:
             # Descuento porcentual
-            discount_amount = int(original_amount * (coupon.percent_off / 100))
+            # CORRECCIÓN: Usamos round() antes de int() para evitar errores de centavos
+            # Ejemplo: 2999 * 0.3334 = 999.86 -> round sube a 1000. int solo truncaba a 999.
+            discount_amount = int(round(original_amount * (coupon.percent_off / 100)))
+            
             final_amount = original_amount - discount_amount
             discount_desc = f"-{coupon.percent_off}%"
         
         elif coupon.amount_off:
             # Descuento de monto fijo
-            # Validar moneda del cupón vs moneda del plan
             if coupon.currency.upper() != currency:
                 raise HTTPException(status_code=400, detail=f"El cupón es para {coupon.currency.upper()}, no para {currency}.")
             
@@ -526,14 +522,13 @@ async def validate_promo_code(request: Request):
             "currency": currency,
             "description": discount_desc,
             "coupon_name": coupon.name or promo.code,
-            "promo_id": promo.id # Devolvemos el ID real para usarlo en el checkout si se requiere
+            "promo_id": promo.id
         }
 
     except HTTPException as he:
         raise he
     except Exception as e:
         log.error(f"Error validando promo: {e}")
-        # Retornamos 500 solo si es un error de servidor no controlado
         raise HTTPException(status_code=500, detail=f"Error interno validando el código: {str(e)}")
 
 @app.post("/create-payment-intent", tags=["Billing"])
