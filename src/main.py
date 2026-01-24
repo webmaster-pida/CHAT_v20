@@ -458,6 +458,66 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
         return {"is_vip_user": True}
     return {"is_vip_user": False}
 
+@app.post("/validate-promo-code", tags=["Billing"])
+async def validate_promo_code(request: Request):
+    try:
+        data = await request.json()
+        promo_code = data.get("code", "").strip()
+        price_id = data.get("priceId")
+
+        if not promo_code or not price_id:
+            raise HTTPException(status_code=400, detail="Faltan datos requeridos.")
+
+        # 1. Buscar el código de promoción en Stripe
+        # 'active=True' asegura que el código pueda usarse.
+        promos = stripe.PromotionCode.list(code=promo_code, active=True, limit=1)
+        
+        if not promos.data:
+            raise HTTPException(status_code=404, detail="Código no válido o expirado.")
+
+        promo = promos.data[0]
+        coupon = promo.coupon
+
+        # 2. Obtener detalles del precio original para calcular el total final
+        price_obj = stripe.Price.retrieve(price_id)
+        original_amount = price_obj.unit_amount # En centavos (ej: 1999)
+        currency = price_obj.currency.upper()
+
+        # 3. Calcular descuento
+        final_amount = original_amount
+        discount_desc = ""
+
+        if coupon.percent_off:
+            discount_amount = int(original_amount * (coupon.percent_off / 100))
+            final_amount = original_amount - discount_amount
+            discount_desc = f"-{coupon.percent_off}%"
+        elif coupon.amount_off:
+            # Verificar que la moneda del cupón coincida
+            if coupon.currency.upper() != currency:
+                raise HTTPException(status_code=400, detail=f"Este cupón no es válido para pagos en {currency}.")
+            
+            final_amount = original_amount - coupon.amount_off
+            discount_desc = f"-${coupon.amount_off / 100:.2f} {currency}"
+
+        # Evitar negativos
+        if final_amount < 0: final_amount = 0
+
+        return {
+            "valid": True,
+            "code": promo.code,
+            "original_amount": original_amount,
+            "final_amount": final_amount,
+            "currency": currency,
+            "description": discount_desc,
+            "coupon_name": coupon.name or promo.code
+        }
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        log.error(f"Error validando promo: {e}")
+        raise HTTPException(status_code=500, detail="Error al validar el código.")
+
 @app.post("/create-payment-intent", tags=["Billing"])
 async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, Any] = Depends(get_current_user)):
     try:
