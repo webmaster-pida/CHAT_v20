@@ -2,8 +2,8 @@
 
 import vertexai
 import asyncio 
-# CORRECCIÓN: Importamos GoogleSearch directamente de generative_models
-from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig, Tool, GoogleSearch
+# CORRECCIÓN: Usamos GoogleSearchRetrieval como indicó la fuente externa
+from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig, Tool, GoogleSearchRetrieval
 from typing import List, AsyncGenerator
 from src.config import settings, log
 from src.models.chat_models import ChatMessage
@@ -51,11 +51,12 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
         chat = model.start_chat(history=history)
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
-        # --- CORRECCIÓN DEFINITIVA ---
-        # Usamos la clase GoogleSearch importada directamente.
-        # Esto cumple con el requisito del campo 'google_search' en la API.
+        # --- CORRECCIÓN HÍBRIDA ---
+        # 1. Usamos la CLASE que existe: GoogleSearchRetrieval() (Acierto de tu papá)
+        # 2. Usamos el CAMPO que exige el modelo: google_search (Corrección del Error 400)
+        # Esto satisface a Python (importación) y a la API (estructura).
         google_search_tool = Tool(
-            google_search=GoogleSearch()
+            google_search=GoogleSearchRetrieval()
         )
         
         # Enviamos el mensaje pasando la herramienta en una lista
