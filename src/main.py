@@ -461,34 +461,28 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
 @app.post("/validate-promo-code", tags=["Billing"])
 async def validate_promo_code(request: Request):
     """
-    Valida cupón usando Metadatos para corregir discrepancias de la API de Stripe.
-    Cruza el ID del precio con el STRIPE_PRICE_MAP interno.
+    Valida cupón usando Metadatos y el mapa de precios plano de Python.
     """
     try:
         data = await request.json()
         promo_code = data.get("code", "").strip()
         price_id = data.get("priceId")
 
-        print(f"--- VALIDANDO CUPÓN (METADATA STRATEGY) ---")
+        print(f"--- VALIDANDO CUPÓN (METADATA FIXED) ---")
         print(f"Código: {promo_code} | Precio ID: {price_id}")
 
         if not promo_code or not price_id:
             raise HTTPException(status_code=400, detail="Faltan datos requeridos.")
 
-        # 1. Identificar el Plan Interno (basico, avanzado, premium)
-        # Buscamos en el mapa global STRIPE_PRICE_MAP
-        current_plan_name = None
-        for plan_name, intervals in STRIPE_PRICE_MAP.items():
-            for interval, currencies in intervals.items():
-                for currency, details in currencies.items():
-                    if details['id'] == price_id:
-                        current_plan_name = plan_name # Ej: 'basico', 'premium'
-                        break
+        # 1. Identificar el Plan Interno (CORREGIDO)
+        # STRIPE_PRICE_MAP en Python es { "price_id": "nombre_plan" }
+        # No necesitamos bucles, solo un acceso directo.
+        current_plan_name = STRIPE_PRICE_MAP.get(price_id)
         
         print(f"Plan Identificado internamente: {current_plan_name}")
 
         if not current_plan_name:
-             # Si el ID no está en nuestro mapa, es un error de configuración o hacking
+             # Si el ID no está en nuestro mapa, es un error de configuración o el ID cambió
              raise HTTPException(status_code=400, detail="El plan seleccionado no es válido en el sistema.")
 
         # 2. Buscar el código de promoción en Stripe
@@ -508,10 +502,8 @@ async def validate_promo_code(request: Request):
             raise HTTPException(status_code=500, detail="Error de conexión con Stripe.")
 
         # 4. VALIDACIÓN DE RESTRICCIONES (PRIORIDAD: METADATA)
-        # Esto soluciona el problema de que 'applies_to' venga vacío de la API.
         
-        # A) Chequeo por Metadata 'allowed_plans' (La solución robusta)
-        # En Stripe debes agregar metadata: allowed_plans = "premium"
+        # A) Chequeo por Metadata 'allowed_plans'
         allowed_plans_meta = coupon.metadata.get("allowed_plans")
         
         if allowed_plans_meta:
@@ -528,9 +520,8 @@ async def validate_promo_code(request: Request):
             else:
                 print("✅ Validación Metadata Exitosa.")
         
-        # B) Chequeo nativo (Fallback por si Stripe decide enviarlo bien)
+        # B) Chequeo nativo (Fallback)
         elif coupon.get("applies_to"):
-            # Obtenemos el producto de Stripe asociado al precio
             try:
                 price_obj = stripe.Price.retrieve(price_id)
                 current_product_id = price_obj.product
@@ -540,18 +531,17 @@ async def validate_promo_code(request: Request):
                     print(f"❌ BLOQUEO NATIVO: Producto {current_product_id} no permitido.")
                     raise HTTPException(status_code=400, detail="Código no válido para este plan.")
             except Exception:
-                pass # Si falla esta verificación secundaria, continuamos
+                pass 
 
         else:
             print("⚠️ Advertencia: Cupón sin restricciones explícitas. Se aplicará.")
 
         # 5. Obtener precio para cálculo
-        # Recuperamos el precio de nuevo solo si no lo hicimos en el paso 4B
         price_obj = stripe.Price.retrieve(price_id)
         original_amount = price_obj.unit_amount 
         currency = price_obj.currency.upper()
 
-        # 6. Cálculo matemático (Corrección de redondeo mantenida)
+        # 6. Cálculo matemático
         final_amount = original_amount
         discount_desc = ""
 
