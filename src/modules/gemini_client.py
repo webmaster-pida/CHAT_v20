@@ -2,8 +2,8 @@
 
 import vertexai
 import asyncio 
-# Importamos Tool y grounding (necesarios para la versión GA)
-from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig, Tool, grounding
+# CORRECCIÓN: Importamos GoogleSearch directamente de generative_models
+from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig, Tool, GoogleSearch
 from typing import List, AsyncGenerator
 from src.config import settings, log
 from src.models.chat_models import ChatMessage
@@ -52,10 +52,10 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
         # --- CORRECCIÓN DEFINITIVA ---
-        # El error 400 exigía usar el campo 'google_search'.
-        # Instanciamos la herramienta directamente con la clase de grounding.
+        # Usamos la clase GoogleSearch importada directamente.
+        # Esto cumple con el requisito del campo 'google_search' en la API.
         google_search_tool = Tool(
-            google_search=grounding.GoogleSearch()
+            google_search=GoogleSearch()
         )
         
         # Enviamos el mensaje pasando la herramienta en una lista
