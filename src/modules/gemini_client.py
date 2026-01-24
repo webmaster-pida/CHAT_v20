@@ -2,7 +2,8 @@
 
 import vertexai
 import asyncio 
-from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig
+# IMPORTANTE: Aquí importamos Tool y grounding para GA (versión >= 1.71.0)
+from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig, Tool, grounding
 from typing import List, AsyncGenerator
 from src.config import settings, log
 from src.models.chat_models import ChatMessage
@@ -38,6 +39,7 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
     """
     Genera una respuesta del modelo Gemini en modo streaming ASÍNCRONO REAL.
     Usa send_message_async para no bloquear el event loop.
+    Incluye Grounding con Google Search.
     """
     if not model:
         log.error("El modelo Gemini no está disponible.")
@@ -49,10 +51,13 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
         chat = model.start_chat(history=history)
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
-        # Herramienta GA: Usamos el submódulo 'grounding' para evitar 'preview'
-        google_search_tool = Tool.from_google_search_retrieval(grounding.GoogleSearchRetrieval())
-
-        # --- SOLUCIÓN: Usar el método async nativo ---
+        # Configurar herramienta de Grounding con Google Search (VERSIÓN GA/STABLE)
+        # Usamos el módulo 'grounding' importado arriba para evitar conflictos.
+        google_search_tool = Tool.from_google_search_retrieval(
+            google_search_retrieval=grounding.GoogleSearchRetrieval()
+        )
+        
+        # --- SOLUCIÓN: Usar el método async nativo con TOOLS ---
         response_stream = await chat.send_message_async(
             full_prompt, 
             stream=True, 
