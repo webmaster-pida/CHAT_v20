@@ -2,7 +2,7 @@
 
 import vertexai
 import asyncio 
-# Imports limpios: Sin grounding ni GoogleSearchRetrieval explícitos
+import google.cloud.aiplatform as aiplatform
 from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig, Tool
 from typing import List, AsyncGenerator
 from src.config import settings, log
@@ -39,7 +39,7 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
     """
     Genera una respuesta del modelo Gemini en modo streaming ASÍNCRONO REAL.
     Usa send_message_async para no bloquear el event loop.
-    Incluye Grounding con Google Search con lógica de fallback robusta.
+    Incluye Grounding con Google Search robusto (Bypass SDK).
     """
     if not model:
         log.error("El modelo Gemini no está disponible.")
@@ -47,36 +47,35 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
         return
 
     try:
-        # Iniciamos el chat (la sesión es local, no requiere await)
+        # LOG DE VERSIÓN: Verifica esto en los logs de Cloud Run después del deploy
+        log.info(f"VERSIÓN SDK INSTALADA: {aiplatform.__version__}")
+
+        # --- CONFIGURACIÓN DE GROUNDING (ESTRATEGIA BYPASS/RAW DICT) ---
+        # Usamos un diccionario crudo para saltarnos las limitaciones del SDK instalado.
+        # Esto envía directamente el JSON que la API espera, solucionando el error 400
+        # ("please use google_search field instead") y el AttributeError.
+        tools_config = [
+            {
+                "google_search": {}  # Estructura exacta requerida por API Gemini 2.5
+            }
+        ]
+
         chat = model.start_chat(history=history)
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
-        # --- ESTRATEGIA DEFENSA PARA ERROR 400 Y ATTRIBUTE ERROR ---
-        google_search_tool = None
-        try:
-            # Opción A: Forma oficial para SDKs modernos (1.64+)
-            # Esto genera el campo 'google_search' que exige Gemini 2.5
-            google_search_tool = Tool.from_google_search()
-        except AttributeError:
-            log.warning("Tool.from_google_search() falló (SDK desactualizado?). Usando fallback a PREVIEW.")
-            # Opción B: Fallback a Preview si el SDK principal no tiene el método.
-            # Importamos aquí dentro para evitar errores de carga si el módulo no existe.
-            from vertexai.preview.generative_models import Tool as PreviewTool
-            google_search_tool = PreviewTool.from_google_search()
-
-        # Enviamos el mensaje pasando la herramienta en una lista
+        # Enviamos 'tools' como la lista de diccionarios directamente.
+        # El método send_message_async acepta objetos Tool o dicts compatibles.
         response_stream = await chat.send_message_async(
             full_prompt, 
             stream=True, 
             generation_config=generation_config,
-            tools=[google_search_tool]
+            tools=tools_config 
         )
 
-        # Iteramos sobre el generador asíncrono
         async for chunk in response_stream:
             if chunk.text:
                 yield chunk.text
 
     except Exception as e:
-        log.error(f"Error al generar la respuesta en streaming desde Gemini: {e}", exc_info=True)
+        log.error(f"FALLO CRÍTICO GEMINI 2.5: {str(e)}", exc_info=True)
         yield "Hubo un problema al contactar al servicio de IA."
