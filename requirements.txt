@@ -17,4 +17,4 @@ firebase-admin==6.5.0
 fpdf
 python-docx
 stripe==11.4.0
-# Force cache clear 2026-01-24_v2
+# Force cache clear: Implementation of Tool Object strict typing
