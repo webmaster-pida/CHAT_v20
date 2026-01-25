@@ -3,15 +3,13 @@
 import vertexai
 import asyncio 
 import google.cloud.aiplatform as aiplatform
-# IMPORTANTE: Usamos el namespace PREVIEW.
-# La versión 'preview' contiene la lógica de mapeo correcta para Gemini 2.5
-from vertexai.preview.generative_models import (
+from vertexai.generative_models import (
     GenerativeModel, 
     Content, 
     Part, 
     GenerationConfig, 
     Tool,
-    grounding
+    GoogleSearch # <--- Clase correcta para Gemini 2.5 Pro en SDK 1.134.0
 )
 from typing import List, AsyncGenerator
 from src.config import settings, log
@@ -48,7 +46,7 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
     """
     Genera una respuesta del modelo Gemini en modo streaming ASÍNCRONO REAL.
     Usa send_message_async para no bloquear el event loop.
-    Incluye Grounding con Google Search usando el namespace PREVIEW.
+    Incluye Grounding con Google Search para Gemini 2.5 Pro (SDK 1.134.0).
     """
     if not model:
         log.error("El modelo Gemini no está disponible.")
@@ -56,20 +54,30 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
         return
 
     try:
-        # LOG DE VERIFICACIÓN
-        log.info(f"VERSIÓN SDK INSTALADA: {aiplatform.__version__} (Namespace: PREVIEW)")
+        # LOG de verificación para asegurarnos que Cloud Run cargó la versión correcta
+        log.info(f"SDK Version: {aiplatform.__version__}")
+
+        # --- SOLUCIÓN PARA GEMINI 2.5 PRO (ENERO 2026) ---
+        google_search_tool = None
+        
+        try:
+            # Intento 1: Método de fábrica con la clase GoogleSearch
+            # Este método debería generar el JSON {"google_search": {}}
+            google_search_tool = Tool.from_google_search(
+                google_search=GoogleSearch()
+            )
+        except AttributeError:
+            # Intento 2: Constructor directo (Fallback)
+            # Si 'from_google_search' no existe, usamos el constructor base
+            # pasando el objeto GoogleSearch al campo 'google_search'.
+            log.warning("Método 'from_google_search' no encontrado, usando constructor directo Tool(google_search=...).")
+            google_search_tool = Tool(
+                google_search=GoogleSearch()
+            )
 
         chat = model.start_chat(history=history)
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
-        # --- SOLUCIÓN CON PREVIEW ---
-        # Al usar vertexai.preview, la clase Tool serializa correctamente
-        # GoogleSearchRetrieval al formato que Gemini 2.5 espera.
-        google_search_tool = Tool.from_google_search_retrieval(
-            google_search_retrieval=grounding.GoogleSearchRetrieval()
-        )
-
-        # Enviamos el mensaje pasando la herramienta
         response_stream = await chat.send_message_async(
             full_prompt, 
             stream=True, 
