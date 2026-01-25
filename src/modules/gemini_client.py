@@ -2,15 +2,8 @@
 
 import vertexai
 import asyncio 
-# CAMBIO IMPORTANTE: Usamos el namespace 'preview' para máxima compatibilidad con features recientes
-from vertexai.preview.generative_models import (
-    GenerativeModel, 
-    Tool, 
-    Content, 
-    Part, 
-    GenerationConfig,
-    grounding # Importamos el módulo de grounding para el fallback
-)
+# Imports limpios: Sin grounding ni GoogleSearchRetrieval explícitos
+from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig, Tool
 from typing import List, AsyncGenerator
 from src.config import settings, log
 from src.models.chat_models import ChatMessage
@@ -46,7 +39,7 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
     """
     Genera una respuesta del modelo Gemini en modo streaming ASÍNCRONO REAL.
     Usa send_message_async para no bloquear el event loop.
-    Incluye Grounding con Google Search robusto.
+    Incluye Grounding con Google Search con lógica de fallback robusta.
     """
     if not model:
         log.error("El modelo Gemini no está disponible.")
@@ -58,19 +51,19 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
         chat = model.start_chat(history=history)
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
-        # --- IMPLEMENTACIÓN ROBUSTA (A PRUEBA DE BALAS) ---
-        # Intentamos primero el método moderno que exige la API (campo 'google_search').
-        # Si el SDK de Python aún no lo tiene expuesto como helper, usamos el fallback manual.
+        # --- ESTRATEGIA DEFENSA PARA ERROR 400 Y ATTRIBUTE ERROR ---
+        google_search_tool = None
         try:
-            # Intento 1: La forma moderna 'from_google_search()'
+            # Opción A: Forma oficial para SDKs modernos (1.64+)
+            # Esto genera el campo 'google_search' que exige Gemini 2.5
             google_search_tool = Tool.from_google_search()
         except AttributeError:
-            log.warning("Tool.from_google_search() no encontrado, usando fallback de grounding explícito.")
-            # Intento 2: Estructura explícita usando el módulo grounding
-            google_search_tool = Tool.from_google_search_retrieval(
-                google_search_retrieval=grounding.GoogleSearchRetrieval()
-            )
-        
+            log.warning("Tool.from_google_search() falló (SDK desactualizado?). Usando fallback a PREVIEW.")
+            # Opción B: Fallback a Preview si el SDK principal no tiene el método.
+            # Importamos aquí dentro para evitar errores de carga si el módulo no existe.
+            from vertexai.preview.generative_models import Tool as PreviewTool
+            google_search_tool = PreviewTool.from_google_search()
+
         # Enviamos el mensaje pasando la herramienta en una lista
         response_stream = await chat.send_message_async(
             full_prompt, 
