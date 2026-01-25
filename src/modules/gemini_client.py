@@ -2,15 +2,7 @@
 
 import vertexai
 import asyncio 
-# CORRECCIÓN DEFINITIVA: Importamos 'grounding' como módulo completo.
-from vertexai.generative_models import (
-    GenerativeModel, 
-    Content, 
-    Part, 
-    GenerationConfig, 
-    Tool, 
-    grounding
-)
+from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig, Tool
 from typing import List, AsyncGenerator
 from src.config import settings, log
 from src.models.chat_models import ChatMessage
@@ -58,12 +50,10 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
         chat = model.start_chat(history=history)
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
-        # --- SOLUCIÓN APLICADA ---
-        # 1. Accedemos a la clase mediante el módulo 'grounding' (evita ImportError).
-        # 2. Usamos el método de fábrica 'from_google_search_retrieval' (estándar en 1.78.0+).
-        google_search_tool = Tool.from_google_search_retrieval(
-            google_search_retrieval=grounding.GoogleSearchRetrieval()
-        )
+        # --- SOLUCIÓN FINAL Y LIMPIA ---
+        # Usamos el método moderno del SDK que mapea automáticamente al campo 'google_search'.
+        # Esto soluciona el Error 400 (INVALID_ARGUMENT).
+        google_search_tool = Tool.from_google_search()
         
         # Enviamos el mensaje pasando la herramienta en una lista
         response_stream = await chat.send_message_async(
