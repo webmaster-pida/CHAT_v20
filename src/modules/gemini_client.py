@@ -3,14 +3,7 @@
 import vertexai
 import asyncio 
 import google.cloud.aiplatform as aiplatform
-from vertexai.generative_models import (
-    GenerativeModel, 
-    Content, 
-    Part, 
-    GenerationConfig, 
-    Tool,
-    GoogleSearch # <--- Clase correcta para Gemini 2.5 Pro en SDK 1.134.0
-)
+from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig, Tool
 from typing import List, AsyncGenerator
 from src.config import settings, log
 from src.models.chat_models import ChatMessage
@@ -46,7 +39,7 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
     """
     Genera una respuesta del modelo Gemini en modo streaming ASÍNCRONO REAL.
     Usa send_message_async para no bloquear el event loop.
-    Incluye Grounding con Google Search para Gemini 2.5 Pro (SDK 1.134.0).
+    Incluye Grounding con Google Search usando inyección directa (from_dict).
     """
     if not model:
         log.error("El modelo Gemini no está disponible.")
@@ -54,30 +47,24 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
         return
 
     try:
-        # LOG de verificación para asegurarnos que Cloud Run cargó la versión correcta
-        log.info(f"SDK Version: {aiplatform.__version__}")
-
-        # --- SOLUCIÓN PARA GEMINI 2.5 PRO (ENERO 2026) ---
-        google_search_tool = None
-        
-        try:
-            # Intento 1: Método de fábrica con la clase GoogleSearch
-            # Este método debería generar el JSON {"google_search": {}}
-            google_search_tool = Tool.from_google_search(
-                google_search=GoogleSearch()
-            )
-        except AttributeError:
-            # Intento 2: Constructor directo (Fallback)
-            # Si 'from_google_search' no existe, usamos el constructor base
-            # pasando el objeto GoogleSearch al campo 'google_search'.
-            log.warning("Método 'from_google_search' no encontrado, usando constructor directo Tool(google_search=...).")
-            google_search_tool = Tool(
-                google_search=GoogleSearch()
-            )
+        # LOG DE VERIFICACIÓN
+        log.info(f"VERSIÓN SDK INSTALADA: {aiplatform.__version__}")
 
         chat = model.start_chat(history=history)
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
+        # --- SOLUCIÓN "KEYMASTER" PARA SDK 1.134.0 ---
+        # El SDK tiene el método helper viejo ('from_google_search_retrieval'), 
+        # pero la API de Gemini 2.5 exige el campo nuevo ('google_search').
+        # Usamos 'from_dict' para construir manualmente el Tool correcto
+        # saltándonos la lógica desactualizada del helper.
+        
+        google_search_tool = Tool.from_dict({
+            "google_search": {} 
+        })
+
+        # Enviamos 'tools' como una lista de objetos Tool válidos.
+        # Al haberlo creado con from_dict, el SDK lo reconoce como un objeto Tool legítimo.
         response_stream = await chat.send_message_async(
             full_prompt, 
             stream=True, 
