@@ -2,6 +2,7 @@
 
 import vertexai
 import asyncio 
+# Solo importamos Tool y las clases base.
 from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig, Tool
 from typing import List, AsyncGenerator
 from src.config import settings, log
@@ -50,10 +51,11 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
         chat = model.start_chat(history=history)
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
-        # --- SOLUCIÓN FINAL Y LIMPIA ---
-        # Usamos el método moderno del SDK que mapea automáticamente al campo 'google_search'.
-        # Esto soluciona el Error 400 (INVALID_ARGUMENT).
-        google_search_tool = Tool.from_google_search()
+        # --- SOLUCIÓN DEFINITIVA (Versión 1.90.0+) ---
+        # Pasamos un diccionario vacío al argumento google_search.
+        # Esto le dice a la API explícitamente que active la búsqueda sin configuración extra.
+        # Es compatible con SDKs modernos y evita errores de atributos/imports.
+        google_search_tool = Tool(google_search={})
         
         # Enviamos el mensaje pasando la herramienta en una lista
         response_stream = await chat.send_message_async(
