@@ -2,7 +2,15 @@
 
 import vertexai
 import asyncio 
-from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig, Tool
+# CAMBIO IMPORTANTE: Usamos el namespace 'preview' para máxima compatibilidad con features recientes
+from vertexai.preview.generative_models import (
+    GenerativeModel, 
+    Tool, 
+    Content, 
+    Part, 
+    GenerationConfig,
+    grounding # Importamos el módulo de grounding para el fallback
+)
 from typing import List, AsyncGenerator
 from src.config import settings, log
 from src.models.chat_models import ChatMessage
@@ -38,7 +46,7 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
     """
     Genera una respuesta del modelo Gemini en modo streaming ASÍNCRONO REAL.
     Usa send_message_async para no bloquear el event loop.
-    Incluye Grounding con Google Search.
+    Incluye Grounding con Google Search robusto.
     """
     if not model:
         log.error("El modelo Gemini no está disponible.")
@@ -50,11 +58,18 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
         chat = model.start_chat(history=history)
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
-        # --- SOLUCIÓN PARA SDK 1.134.0 Y GEMINI 2.5 ---
-        # El método from_google_search() es el que activa el nuevo campo 'google_search'
-        # que reemplaza al antiguo 'google_search_retrieval'.
-        # Al usar la versión 1.134.0 fijada en requirements, garantizamos que este método existe.
-        google_search_tool = Tool.from_google_search()
+        # --- IMPLEMENTACIÓN ROBUSTA (A PRUEBA DE BALAS) ---
+        # Intentamos primero el método moderno que exige la API (campo 'google_search').
+        # Si el SDK de Python aún no lo tiene expuesto como helper, usamos el fallback manual.
+        try:
+            # Intento 1: La forma moderna 'from_google_search()'
+            google_search_tool = Tool.from_google_search()
+        except AttributeError:
+            log.warning("Tool.from_google_search() no encontrado, usando fallback de grounding explícito.")
+            # Intento 2: Estructura explícita usando el módulo grounding
+            google_search_tool = Tool.from_google_search_retrieval(
+                google_search_retrieval=grounding.GoogleSearchRetrieval()
+            )
         
         # Enviamos el mensaje pasando la herramienta en una lista
         response_stream = await chat.send_message_async(
