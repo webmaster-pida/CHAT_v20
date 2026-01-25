@@ -289,15 +289,24 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
             combined_context += result
             yield create_sse_event({"event": "status", "message": f"Fuente {i+1} procesada..."})
         
+        # --- AQUÍ ES DONDE OCURRE LA MAGIA DE LA LISTA BLANCA ---
+        # 1. Buscamos todas las URLs que provienen de tus fuentes seguras (RAG y Vertex Search antiguo).
+        #    Estas son las únicas que permitiremos que aparezcan en azul en el texto.
+        trusted_urls_list = re.findall(r'\((https?://[^\s\)]+)\)', combined_context)
+        trusted_urls_set = set(trusted_urls_list)
+        
         yield create_sse_event({"event": "status", "message": "Generando respuesta..."})
         
         final_prompt = f"Contexto geográfico: {country_code}\n{combined_context}\n\n---\n\nPregunta del usuario: {chat_request.prompt}"
         
         full_response_text = ""
+        
+        # 2. Pasamos 'trusted_urls' a Gemini Client para que filtre lo que no esté en esa lista.
         async for chunk in gemini_client.generate_streaming_response(
             system_prompt=PIDA_SYSTEM_PROMPT,
             prompt=final_prompt,
-            history=history_for_gemini
+            history=history_for_gemini,
+            trusted_urls=trusted_urls_set # <--- ¡ESTA ES LA CLAVE!
         ):
             yield create_sse_event({'text': chunk})
             full_response_text += chunk

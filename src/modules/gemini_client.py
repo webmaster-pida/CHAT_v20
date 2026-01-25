@@ -28,8 +28,6 @@ try:
     )
 
     # --- CONFIGURACIÓN "SIN CENSURA" (BLOCK_NONE) ---
-    # Esto desactiva completamente los filtros de seguridad de Vertex AI.
-    # Es necesario para tratar casos crudos de violaciones a DDHH.
     safety_settings = {
         HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
         HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
@@ -47,7 +45,6 @@ except Exception as e:
 # --- FUNCIONES AUXILIARES ---
 
 def prepare_history_for_vertex(history: List[ChatMessage]) -> List[Content]:
-    """Convierte nuestro historial de Pydantic al formato que espera la API de Gemini."""
     vertex_history = []
     for message in history:
         role = 'user' if message.role == 'user' else 'model'
@@ -58,11 +55,9 @@ async def generate_streaming_response(
     system_prompt: str, 
     prompt: str, 
     history: List[Content],
-    trusted_urls: Set[str] = set() # Lista blanca de URLs seguras (RAG)
+    trusted_urls: Set[str] = set() # LISTA BLANCA
 ) -> AsyncGenerator[str, None]:
-    """
-    Genera respuesta SIN CENSURA y con gestión inteligente de enlaces.
-    """
+    
     if not model:
         log.error("El modelo Gemini no está disponible.")
         yield "Error: El modelo de IA no está configurado correctamente."
@@ -71,24 +66,19 @@ async def generate_streaming_response(
     try:
         log.info(f"VERSIÓN SDK INSTALADA: {aiplatform.__version__}")
 
-        # 1. INICIO DE CHAT PERMISIVO
-        # response_validation=False: Evita error por Copyright/Citas textuales (Recitation)
+        # 1. INICIO DE CHAT
         chat = model.start_chat(history=history, response_validation=False)
-        
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
         # 2. HERRAMIENTA DE BÚSQUEDA
-        google_search_tool = Tool.from_dict({
-            "google_search": {} 
-        })
+        google_search_tool = Tool.from_dict({"google_search": {}})
         
-        # 3. GENERACIÓN DE CONTENIDO
-        # Pasamos safety_settings con BLOCK_NONE para que no corte nada.
+        # 3. GENERACIÓN
         response_stream = await chat.send_message_async(
             full_prompt, 
             stream=True, 
             generation_config=generation_config,
-            safety_settings=safety_settings, # <--- LA CLAVE DE LA NO-CENSURA
+            safety_settings=safety_settings,
             tools=[google_search_tool]
         )
 
@@ -96,7 +86,7 @@ async def generate_streaming_response(
         
         async for chunk in response_stream:
             
-            # A. RECOLECCIÓN DE METADATOS (Solo para el footer)
+            # A. RECOLECCIÓN DE METADATOS
             if chunk.candidates and chunk.candidates[0].grounding_metadata:
                 metadata = chunk.candidates[0].grounding_metadata
                 if hasattr(metadata, 'grounding_chunks'):
@@ -106,44 +96,59 @@ async def generate_streaming_response(
                             title = g_chunk.web.title or "Fuente Web"
                             unique_footer_sources[url] = title
 
-            # B. PROCESAMIENTO DE TEXTO (LISTA BLANCA DE LINKS)
+            # B. FILTRADO DE TEXTO (DOBLE PASADA)
             try:
                 if chunk.text:
                     text_content = chunk.text
                     
-                    def filter_link_whitelist(match):
-                        link_text = match.group(1) # Texto visible
-                        link_url = match.group(2)  # URL
-                        
-                        # --- FILTRO DE LISTA BLANCA ---
-                        # ¿Esta URL ya existía en tus documentos originales (trusted)?
-                        is_trusted = False
-                        clean_link = link_url.lower().strip()
-                        
-                        # Buscamos si la URL generada coincide con alguna de tus fuentes RAG
+                    # --- FUNCIÓN DE VALIDACIÓN ESTRICTA ---
+                    def is_url_trusted(url_to_check):
+                        clean_check = url_to_check.lower().strip().rstrip('/')
                         for t_url in trusted_urls:
-                            t_clean = t_url.lower().strip()
-                            if t_clean in clean_link or clean_link in t_clean:
-                                is_trusted = True
-                                break
-                        
-                        if is_trusted:
-                            return match.group(0) # URL CONFIABLE -> LINK AZUL
-                        else:
-                            return link_text # URL NUEVA/GOOGLE -> TEXTO PLANO
+                            # Comparamos la URL base limpia
+                            clean_trust = t_url.lower().strip().rstrip('/')
+                            # Si son idénticas o la de confianza es el inicio exacto de la generada
+                            if clean_check == clean_trust or clean_check.startswith(clean_trust):
+                                return True
+                        return False
 
-                    # Aplicar filtro a todos los links Markdown [Texto](URL)
-                    pattern = r'\[([^\]]+)\]\((https?://[^\)]+)\)'
-                    clean_text = re.sub(pattern, filter_link_whitelist, text_content)
+                    # 1. FILTRO MARKDOWN (Con tolerancia a espacios)
+                    # Detecta: [Texto] ( URL )
+                    def replace_markdown_link(match):
+                        text = match.group(1)
+                        url = match.group(2)
+                        if is_url_trusted(url):
+                            return match.group(0) # URL Segura -> Dejar link
+                        return text # URL Nueva/Rota -> Solo texto
+
+                    # Regex mejorada: \s* permite espacios entre corchetes y paréntesis
+                    md_pattern = r'\[([^\]]+)\]\s*\(\s*(https?://[^\s\)]+)\s*\)'
+                    text_content = re.sub(md_pattern, replace_markdown_link, text_content)
+
+                    # 2. FILTRO DE URLS SUELTAS (Raw URLs)
+                    # Detecta: https://... suelto en el texto
+                    def replace_raw_url(match):
+                        url = match.group(0)
+                        if is_url_trusted(url):
+                            return url
+                        return "" # Si no es segura y está suelta, la borramos para que no se vea feo
+
+                    # Regex para URLs que NO son parte de un link markdown (lookbehind negativo es complejo,
+                    # así que simplificamos asumiendo que el paso 1 ya procesó los markdown).
+                    # Esta regex busca http://... que haya quedado huérfano.
+                    raw_pattern = r'(?<!\()(https?://[^\s\)]+)' 
+                    text_content = re.sub(raw_pattern, replace_raw_url, text_content)
                     
-                    # Limpieza estética de citas numéricas [1]
-                    clean_text = re.sub(r'\s?\[\d+\]', '', clean_text)
+                    # 3. LIMPIEZA FINAL
+                    # Eliminar citas numéricas [1] y dobles espacios
+                    text_content = re.sub(r'\s?\[\d+\]', '', text_content)
+                    text_content = text_content.replace("  ", " ")
                     
-                    yield clean_text
+                    yield text_content
             except Exception:
                 continue
 
-        # C. FOOTER "FUENTES CONSULTADAS" (Lo nuevo de Google)
+        # C. FOOTER "FUENTES CONSULTADAS"
         if unique_footer_sources:
             yield "\n\n---\n**Fuentes Consultadas:**\n"
             for url, title in unique_footer_sources.items():
@@ -151,5 +156,4 @@ async def generate_streaming_response(
 
     except Exception as e:
         log.error(f"Error en Gemini Client: {str(e)}", exc_info=True)
-        # Mensaje de error genérico para el usuario
         yield "Hubo un problema al contactar al servicio de IA."
