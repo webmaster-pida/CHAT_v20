@@ -17,4 +17,4 @@ firebase-admin==6.5.0
 fpdf
 python-docx
 stripe==11.4.0
-# Force cache clear: Implementation of Tool Object strict typing
+# Force cache clear: Implementation of Tool.from_google_search()
