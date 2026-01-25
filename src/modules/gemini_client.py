@@ -27,7 +27,7 @@ try:
         top_p=settings.TOP_P,
     )
 
-    # --- CONFIGURACIÓN "SIN CENSURA" (BLOCK_NONE) ---
+    # CONFIGURACIÓN SIN CENSURA (BLOCK_NONE)
     safety_settings = {
         HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
         HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
@@ -55,7 +55,7 @@ async def generate_streaming_response(
     system_prompt: str, 
     prompt: str, 
     history: List[Content],
-    trusted_urls: Set[str] = set() # LISTA BLANCA
+    trusted_urls: Set[str] = set()
 ) -> AsyncGenerator[str, None]:
     
     if not model:
@@ -66,14 +66,11 @@ async def generate_streaming_response(
     try:
         log.info(f"VERSIÓN SDK INSTALADA: {aiplatform.__version__}")
 
-        # 1. INICIO DE CHAT
         chat = model.start_chat(history=history, response_validation=False)
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
-        # 2. HERRAMIENTA DE BÚSQUEDA
         google_search_tool = Tool.from_dict({"google_search": {}})
         
-        # 3. GENERACIÓN
         response_stream = await chat.send_message_async(
             full_prompt, 
             stream=True, 
@@ -83,10 +80,11 @@ async def generate_streaming_response(
         )
 
         unique_footer_sources = {} 
-        
+        text_buffer = "" 
+
         async for chunk in response_stream:
             
-            # A. RECOLECCIÓN DE METADATOS
+            # A. METADATOS (Footer)
             if chunk.candidates and chunk.candidates[0].grounding_metadata:
                 metadata = chunk.candidates[0].grounding_metadata
                 if hasattr(metadata, 'grounding_chunks'):
@@ -96,59 +94,68 @@ async def generate_streaming_response(
                             title = g_chunk.web.title or "Fuente Web"
                             unique_footer_sources[url] = title
 
-            # B. FILTRADO DE TEXTO (DOBLE PASADA)
+            # B. PROCESAMIENTO Y LIMPIEZA
             try:
                 if chunk.text:
-                    text_content = chunk.text
+                    text_buffer += chunk.text
                     
-                    # --- FUNCIÓN DE VALIDACIÓN ESTRICTA ---
+                    # --- 1. LÓGICA DE LISTA BLANCA ---
                     def is_url_trusted(url_to_check):
                         clean_check = url_to_check.lower().strip().rstrip('/')
                         for t_url in trusted_urls:
-                            # Comparamos la URL base limpia
                             clean_trust = t_url.lower().strip().rstrip('/')
-                            # Si son idénticas o la de confianza es el inicio exacto de la generada
                             if clean_check == clean_trust or clean_check.startswith(clean_trust):
                                 return True
                         return False
 
-                    # 1. FILTRO MARKDOWN (Con tolerancia a espacios)
-                    # Detecta: [Texto] ( URL )
-                    def replace_markdown_link(match):
-                        text = match.group(1)
-                        url = match.group(2)
-                        if is_url_trusted(url):
-                            return match.group(0) # URL Segura -> Dejar link
-                        return text # URL Nueva/Rota -> Solo texto
-
-                    # Regex mejorada: \s* permite espacios entre corchetes y paréntesis
+                    # --- 2. LIMPIEZA DE LINKS (MARKDOWN Y RAW) ---
+                    # Markdown: [Texto](URL)
                     md_pattern = r'\[([^\]]+)\]\s*\(\s*(https?://[^\s\)]+)\s*\)'
-                    text_content = re.sub(md_pattern, replace_markdown_link, text_content)
+                    def replace_markdown_link(match):
+                        return match.group(0) if is_url_trusted(match.group(2)) else match.group(1)
+                    text_buffer = re.sub(md_pattern, replace_markdown_link, text_buffer)
 
-                    # 2. FILTRO DE URLS SUELTAS (Raw URLs)
-                    # Detecta: https://... suelto en el texto
-                    def replace_raw_url(match):
-                        url = match.group(0)
-                        if is_url_trusted(url):
-                            return url
-                        return "" # Si no es segura y está suelta, la borramos para que no se vea feo
-
-                    # Regex para URLs que NO son parte de un link markdown (lookbehind negativo es complejo,
-                    # así que simplificamos asumiendo que el paso 1 ya procesó los markdown).
-                    # Esta regex busca http://... que haya quedado huérfano.
+                    # URLs Sueltas: https://...
                     raw_pattern = r'(?<!\()(https?://[^\s\)]+)' 
-                    text_content = re.sub(raw_pattern, replace_raw_url, text_content)
+                    def replace_raw_url(match):
+                        return match.group(0) if is_url_trusted(match.group(0)) else ""
+                    text_buffer = re.sub(raw_pattern, replace_raw_url, text_buffer)
+
+                    # --- 3. LIMPIEZA DE VIÑETAS/BULLETS HUÉRFANOS (LO QUE SEÑALASTE) ---
+                    # Elimina viñetas (•, *, -) que queden solas al final de una línea o bloque
+                    # o que estén seguidas solo por espacios (típico cuando borramos el link que seguía).
+                    text_buffer = re.sub(r'^\s*[•*\-]\s*$', '', text_buffer, flags=re.MULTILINE)
+                    text_buffer = re.sub(r'\s+[•*\-]\s*$', '', text_buffer) 
                     
-                    # 3. LIMPIEZA FINAL
-                    # Eliminar citas numéricas [1] y dobles espacios
-                    text_content = re.sub(r'\s?\[\d+\]', '', text_content)
-                    text_content = text_content.replace("  ", " ")
-                    
-                    yield text_content
+                    # Elimina viñetas que quedaron antes de un salto de línea doble
+                    text_buffer = re.sub(r'\n\s*[•*\-]\s*\n', '\n', text_buffer)
+
+                    # --- 4. LIMPIEZA DE ARTIFACTS DE CITAS ([1]) ---
+                    text_buffer = re.sub(r'\s?\[\s*\d+\s*\]', '', text_buffer)
+
+                    # --- 5. BUFFER STREAMING ---
+                    # Retenemos el texto si termina en caracteres peligrosos que podrían ser el inicio de algo
+                    if len(text_buffer) < 300: # Aumentamos buffer para atrapar bullets colgados
+                        # Si termina en un posible inicio de viñeta o link, esperamos
+                        if any(text_buffer.endswith(c) for c in ['[', '(', '•', '-', '*', ' ']):
+                            continue
+                        else:
+                            yield text_buffer
+                            text_buffer = ""
+                    else:
+                        yield text_buffer
+                        text_buffer = ""
+
             except Exception:
                 continue
+        
+        # 3. VACIAR BUFFER FINAL
+        if text_buffer:
+            # Última pasada agresiva para limpiar bullets finales
+            text_buffer = re.sub(r'\s*[•*\-]\s*$', '', text_buffer)
+            yield text_buffer
 
-        # C. FOOTER "FUENTES CONSULTADAS"
+        # C. FOOTER
         if unique_footer_sources:
             yield "\n\n---\n**Fuentes Consultadas:**\n"
             for url, title in unique_footer_sources.items():
