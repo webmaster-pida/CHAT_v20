@@ -2,7 +2,6 @@
 
 import vertexai
 import asyncio 
-# Solo importamos Tool y las clases base.
 from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig, Tool
 from typing import List, AsyncGenerator
 from src.config import settings, log
@@ -51,11 +50,11 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
         chat = model.start_chat(history=history)
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
-        # --- SOLUCIÓN DEFINITIVA (Versión 1.90.0+) ---
-        # Pasamos un diccionario vacío al argumento google_search.
-        # Esto le dice a la API explícitamente que active la búsqueda sin configuración extra.
-        # Es compatible con SDKs modernos y evita errores de atributos/imports.
-        google_search_tool = Tool(google_search={})
+        # --- SOLUCIÓN PARA SDK 1.134.0 Y GEMINI 2.5 ---
+        # El método from_google_search() es el que activa el nuevo campo 'google_search'
+        # que reemplaza al antiguo 'google_search_retrieval'.
+        # Al usar la versión 1.134.0 fijada en requirements, garantizamos que este método existe.
+        google_search_tool = Tool.from_google_search()
         
         # Enviamos el mensaje pasando la herramienta en una lista
         response_stream = await chat.send_message_async(
