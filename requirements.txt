@@ -17,4 +17,4 @@ firebase-admin==6.5.0
 fpdf
 python-docx
 stripe==11.4.0
-# Force cache clear: Tool.from_dict strategy
+# Force cache clear: Regex cleaning and Metadata extraction implementation
