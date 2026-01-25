@@ -2,7 +2,8 @@
 
 import vertexai
 import asyncio 
-import re # Importamos Regex para limpiar los links rotos
+import re 
+from urllib.parse import urlparse
 import google.cloud.aiplatform as aiplatform
 from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig, Tool
 from typing import List, AsyncGenerator
@@ -36,10 +37,25 @@ def prepare_history_for_vertex(history: List[ChatMessage]) -> List[Content]:
         vertex_history.append(Content(role=role, parts=[Part.from_text(message.content)]))
     return vertex_history
 
+def extract_domain(url: str) -> str:
+    """Extrae el dominio base de una URL para comparar orígenes."""
+    try:
+        if not url: return ""
+        netloc = urlparse(url).netloc
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        return netloc.lower()
+    except:
+        return ""
+
 async def generate_streaming_response(system_prompt: str, prompt: str, history: List[Content]) -> AsyncGenerator[str, None]:
     """
-    Genera una respuesta del modelo Gemini en modo streaming ASÍNCRONO REAL.
-    Limpia enlaces rotos de vertexaisearch y añade fuentes reales al final.
+    Genera respuesta con Google Search.
+    1. Nutre la respuesta con información de internet.
+    2. FILTRA el cuerpo del texto:
+       - Links de RAG (tuyos) -> SE MANTIENEN.
+       - Links de Google Search -> SE DESVINCULAN (Solo texto) para no alterar tu sección clásica.
+    3. Agrega 'Fuentes Consultadas' al final con los links tal como vienen.
     """
     if not model:
         log.error("El modelo Gemini no está disponible.")
@@ -47,14 +63,13 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
         return
 
     try:
-        # LOG DE VERIFICACIÓN
         log.info(f"VERSIÓN SDK INSTALADA: {aiplatform.__version__}")
 
         chat = model.start_chat(history=history)
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
-        # 1. Configuración de la herramienta (Estrategia from_dict para SDK 1.134.0)
-        # Usamos from_dict para inyectar 'google_search' sin depender de métodos que faltan en el SDK.
+        # 1. ACTIVAMOS GOOGLE SEARCH (Nutrición)
+        # Usamos from_dict para asegurar compatibilidad total con tu versión de SDK
         google_search_tool = Tool.from_dict({
             "google_search": {} 
         })
@@ -66,57 +81,81 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
             tools=[google_search_tool]
         )
 
-        # Variables para guardar las fuentes reales y evitar duplicados
-        unique_sources = {} 
+        # Variables para controlar fuentes
+        google_domains_found = set()
+        unique_footer_sources = {} 
         
         async for chunk in response_stream:
-            # A. Procesamiento de Metadatos (Extracción de URLs reales)
-            # Verificamos si el chunk trae candidatos y metadatos de grounding
+            
+            # A. DETECTAR ORIGEN DE LA INFORMACIÓN
             if chunk.candidates and chunk.candidates[0].grounding_metadata:
                 metadata = chunk.candidates[0].grounding_metadata
-                
-                # Buscamos en los 'grounding_chunks' que es donde Gemini pone la data web
                 if hasattr(metadata, 'grounding_chunks'):
                     for g_chunk in metadata.grounding_chunks:
-                        # Si es un resultado web y tiene URL válida
                         if g_chunk.web and g_chunk.web.uri:
-                            title = g_chunk.web.title or "Fuente Externa"
                             url = g_chunk.web.uri
-                            # Guardamos en diccionario para evitar duplicados
-                            unique_sources[url] = title
+                            title = g_chunk.web.title or "Fuente Web"
+                            
+                            # Registramos el dominio como "Fuente de Google"
+                            domain = extract_domain(url)
+                            if domain:
+                                google_domains_found.add(domain)
+                            
+                            # Guardamos para el footer final tal cual viene
+                            unique_footer_sources[url] = title
 
-            # B. Procesamiento del Texto (Limpieza de Links Rotos)
+            # B. PROCESAMIENTO DEL TEXTO (El Filtro)
             try:
                 if chunk.text:
                     text_content = chunk.text
                     
-                    # 1. ELIMINAR EL LINK ROTO (404)
-                    # Patrón: [Texto](https://vertexaisearch...) -> **Texto**
-                    clean_text = re.sub(
-                        r'\[([^\]]+)\]\(https://vertexaisearch[^\)]+\)', 
-                        r'**\1**', 
-                        text_content
-                    )
-                    
-                    # 2. Limpiar links sueltos sin corchetes si los hubiera
-                    clean_text = re.sub(
-                        r'https://vertexaisearch[^\s\)]+', 
-                        '', 
-                        clean_text
-                    )
+                    # Función que decide si un link se queda o se va
+                    def filter_link_logic(match):
+                        link_text = match.group(1) # El texto visible
+                        link_url = match.group(2)  # La URL
+                        
+                        link_domain = extract_domain(link_url)
 
+                        # ¿Es este link propiedad de Google Search?
+                        is_google_link = False
+                        
+                        # Criterio 1: Es un link técnico de Vertex
+                        if "vertexaisearch" in link_url or "google.com/grounding" in link_url:
+                            is_google_link = True
+                        
+                        # Criterio 2: El dominio coincide con lo que Google trajo en esta búsqueda
+                        # (Esto atrapa los links a noticias externas que Google inserta)
+                        if not is_google_link:
+                            for g_domain in google_domains_found:
+                                if g_domain and g_domain in link_domain:
+                                    is_google_link = True
+                                    break
+                        
+                        if is_google_link:
+                            # ES DE GOOGLE -> Solo texto (Protegemos tu sección clásica)
+                            return link_text
+                        else:
+                            # NO ES DE GOOGLE (Es tu RAG) -> Link completo
+                            return match.group(0)
+
+                    # Aplicamos el filtro a todos los links [Texto](URL)
+                    pattern = r'\[([^\]]+)\]\((https?://[^\)]+)\)'
+                    clean_text = re.sub(pattern, filter_link_logic, text_content)
+                    
+                    # Limpieza cosmética de citas numéricas [1]
+                    clean_text = re.sub(r'\s?\[\d+\]', '', clean_text)
+                    
                     yield clean_text
             except Exception:
-                # Si chunk.text falla (ej. bloqueado por seguridad), continuamos
                 continue
 
-        # C. AL FINAL: Agregamos las fuentes reales que sí funcionan
-        if unique_sources:
-            yield "\n\n**Fuentes Consultadas:**\n"
-            for url, title in unique_sources.items():
-                # Generamos una lista markdown con los enlaces originales (elpais, bbc, etc.)
+        # C. FOOTER "FUENTES CONSULTADAS"
+        # Aquí van los links de Google, tal como vienen.
+        if unique_footer_sources:
+            yield "\n\n---\n**Fuentes Consultadas:**\n"
+            for url, title in unique_footer_sources.items():
                 yield f"- [{title}]({url})\n"
 
     except Exception as e:
-        log.error(f"FALLO CRÍTICO GEMINI 2.5: {str(e)}", exc_info=True)
+        log.error(f"Error en Gemini Client: {str(e)}", exc_info=True)
         yield "Hubo un problema al contactar al servicio de IA."
