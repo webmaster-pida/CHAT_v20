@@ -3,7 +3,16 @@
 import vertexai
 import asyncio 
 import google.cloud.aiplatform as aiplatform
-from vertexai.generative_models import GenerativeModel, Content, Part, GenerationConfig, Tool
+# IMPORTANTE: Usamos el namespace PREVIEW.
+# La versión 'preview' contiene la lógica de mapeo correcta para Gemini 2.5
+from vertexai.preview.generative_models import (
+    GenerativeModel, 
+    Content, 
+    Part, 
+    GenerationConfig, 
+    Tool,
+    grounding
+)
 from typing import List, AsyncGenerator
 from src.config import settings, log
 from src.models.chat_models import ChatMessage
@@ -39,7 +48,7 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
     """
     Genera una respuesta del modelo Gemini en modo streaming ASÍNCRONO REAL.
     Usa send_message_async para no bloquear el event loop.
-    Incluye Grounding con Google Search usando el método oficial para SDK 1.134.0.
+    Incluye Grounding con Google Search usando el namespace PREVIEW.
     """
     if not model:
         log.error("El modelo Gemini no está disponible.")
@@ -48,23 +57,24 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
 
     try:
         # LOG DE VERIFICACIÓN
-        log.info(f"VERSIÓN SDK INSTALADA: {aiplatform.__version__}")
-
-        # --- LA SOLUCIÓN DEFINITIVA PARA ENERO 2026 ---
-        # Este método es el ÚNICO que genera el campo 'google_search' que exige el error 400.
-        # En la versión 1.134.0 ESTÁ disponible.
-        google_search_tool = Tool.from_google_search()
+        log.info(f"VERSIÓN SDK INSTALADA: {aiplatform.__version__} (Namespace: PREVIEW)")
 
         chat = model.start_chat(history=history)
-        
-        # El full_prompt ya incluye los documentos de tu RAG manual 
         full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
         
+        # --- SOLUCIÓN CON PREVIEW ---
+        # Al usar vertexai.preview, la clase Tool serializa correctamente
+        # GoogleSearchRetrieval al formato que Gemini 2.5 espera.
+        google_search_tool = Tool.from_google_search_retrieval(
+            google_search_retrieval=grounding.GoogleSearchRetrieval()
+        )
+
+        # Enviamos el mensaje pasando la herramienta
         response_stream = await chat.send_message_async(
             full_prompt, 
             stream=True, 
             generation_config=generation_config,
-            tools=[google_search_tool] # <--- Enviamos el objeto correcto
+            tools=[google_search_tool] 
         )
 
         async for chunk in response_stream:
@@ -72,6 +82,5 @@ async def generate_streaming_response(system_prompt: str, prompt: str, history: 
                 yield chunk.text
 
     except Exception as e:
-        # Imprimimos el error completo para estar seguros
         log.error(f"FALLO CRÍTICO GEMINI 2.5: {str(e)}", exc_info=True)
         yield "Hubo un problema al contactar al servicio de IA."
