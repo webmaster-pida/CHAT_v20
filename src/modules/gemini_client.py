@@ -3,7 +3,9 @@
 import vertexai
 import asyncio 
 import re 
+import random # Necesario para el "jitter" en la espera
 import google.cloud.aiplatform as aiplatform
+from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable, Aborted, InternalServerError # Excepciones de Google
 from vertexai.generative_models import (
     GenerativeModel, 
     Content, 
@@ -62,43 +64,52 @@ async def generate_streaming_response(
         yield "Error: El modelo de IA no está configurado correctamente."
         return
 
-    try:
-        log.info(f"VERSIÓN SDK INSTALADA: {aiplatform.__version__}")
+    # CONFIGURACIÓN DE REINTENTOS (BACKOFF EXPONENCIAL)
+    MAX_RETRIES = 3
+    BASE_DELAY = 2 # Segundos iniciales de espera
 
-        chat = model.start_chat(history=history, response_validation=False)
-        full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
-        
-        google_search_tool = Tool.from_dict({"google_search": {}})
-        
-        response_stream = await chat.send_message_async(
-            full_prompt, 
-            stream=True, 
-            generation_config=generation_config,
-            safety_settings=safety_settings,
-            tools=[google_search_tool]
-        )
+    full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
+    google_search_tool = Tool.from_dict({"google_search": {}})
 
-        unique_footer_sources = {} 
-        text_buffer = "" 
-
-        async for chunk in response_stream:
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            log.info(f"Intento de generación {attempt + 1}/{MAX_RETRIES + 1} con modelo {settings.GEMINI_MODEL}")
             
-            # A. METADATOS
-            if chunk.candidates and chunk.candidates[0].grounding_metadata:
-                metadata = chunk.candidates[0].grounding_metadata
-                if hasattr(metadata, 'grounding_chunks'):
-                    for g_chunk in metadata.grounding_chunks:
-                        if g_chunk.web and g_chunk.web.uri:
-                            url = g_chunk.web.uri
-                            title = g_chunk.web.title or "Fuente Web"
-                            unique_footer_sources[url] = title
+            # 1. INICIAR CHAT (Sin validación para evitar errores de Copyright)
+            chat = model.start_chat(history=history, response_validation=False)
+            
+            # 2. ENVIAR MENSAJE
+            response_stream = await chat.send_message_async(
+                full_prompt, 
+                stream=True, 
+                generation_config=generation_config,
+                safety_settings=safety_settings,
+                tools=[google_search_tool]
+            )
 
-            # B. PROCESAMIENTO
-            try:
+            # Si llegamos aquí, la conexión se estableció correctamente (superamos el 429 inicial)
+            
+            unique_footer_sources = {} 
+            text_buffer = "" 
+
+            # 3. PROCESAR STREAM
+            async for chunk in response_stream:
+                
+                # A. METADATOS
+                if chunk.candidates and chunk.candidates[0].grounding_metadata:
+                    metadata = chunk.candidates[0].grounding_metadata
+                    if hasattr(metadata, 'grounding_chunks'):
+                        for g_chunk in metadata.grounding_chunks:
+                            if g_chunk.web and g_chunk.web.uri:
+                                url = g_chunk.web.uri
+                                title = g_chunk.web.title or "Fuente Web"
+                                unique_footer_sources[url] = title
+
+                # B. LIMPIEZA DE TEXTO (Aggressive Cleaning + Whitelist)
                 if chunk.text:
                     text_buffer += chunk.text
                     
-                    # --- 1. LÓGICA DE LISTA BLANCA ---
+                    # --- Lógica de Limpieza ---
                     def is_url_trusted(url_to_check):
                         clean_check = url_to_check.lower().strip().rstrip('/')
                         for t_url in trusted_urls:
@@ -107,41 +118,28 @@ async def generate_streaming_response(
                                 return True
                         return False
 
-                    # --- 2. ELIMINAR LINKS NO CONFIABLES ---
-                    # Markdown [Texto](URL) -> Texto
+                    # Links Markdown
                     md_pattern = r'\[([^\]]+)\]\s*\(\s*(https?://[^\s\)]+)\s*\)'
                     def replace_markdown_link(match):
-                        # Si es confiable, devolvemos todo el match. Si no, solo el texto.
                         return match.group(0) if is_url_trusted(match.group(2)) else match.group(1)
                     text_buffer = re.sub(md_pattern, replace_markdown_link, text_buffer)
 
-                    # URLs sueltas -> Vacío
+                    # URLs Sueltas
                     raw_pattern = r'(?<!\()(https?://[^\s\)]+)' 
                     def replace_raw_url(match):
                         return match.group(0) if is_url_trusted(match.group(0)) else ""
                     text_buffer = re.sub(raw_pattern, replace_raw_url, text_buffer)
                     
-                    # Citas [1] -> Vacío
+                    # Artifacts de Citas [1]
                     text_buffer = re.sub(r'\s?\[\s*\d+\s*\]', '', text_buffer)
 
-                    # --- 3. AGGRESSIVE STRUCTURE CLEANING (La solución a los íconos rojos) ---
-                    
-                    # A. Eliminar líneas que son SOLO viñetas o bloques vacíos
-                    # Esto borra líneas como "* ", "- ", "> " o "• " que quedaron vacías tras borrar el link.
-                    # (?m) activa modo multilínea para que ^ y $ funcionen por línea.
+                    # AGGRESSIVE STRUCTURE CLEANING (Viñetas y bloques vacíos)
                     text_buffer = re.sub(r'(?m)^\s*[\-\*•>]\s*$', '', text_buffer)
-                    
-                    # B. Eliminar bloques de cita anidados vacíos o rotos (causa frecuente de artifacts)
                     text_buffer = re.sub(r'(?m)^\s*>\s*>\s*$', '', text_buffer)
-                    
-                    # C. Eliminar Negritas vacías que quedan tras borrar contenido (** **)
                     text_buffer = re.sub(r'\*\*\s*\*\*', '', text_buffer)
-
-                    # D. Eliminar dobles saltos de línea excesivos causados por borrar líneas enteras
                     text_buffer = re.sub(r'\n\s*\n\s*\n', '\n\n', text_buffer)
 
-                    # --- 4. STREAMING ---
-                    # Buffer de seguridad para no cortar estructuras a la mitad
+                    # Buffer Streaming
                     if len(text_buffer) < 400: 
                         if any(text_buffer.strip().endswith(c) for c in ['[', '(', '*', '-', '>', '•']):
                             continue
@@ -151,21 +149,42 @@ async def generate_streaming_response(
                         yield text_buffer
                         text_buffer = ""
 
-            except Exception:
-                continue
-        
-        # 3. VACIAR BUFFER FINAL CON LIMPIEZA FINAL
-        if text_buffer:
-            # Última pasada para matar viñetas colgadas al final
-            text_buffer = re.sub(r'(?m)^\s*[\-\*•>]\s*$', '', text_buffer)
-            yield text_buffer
+            # 4. VACIAR BUFFER FINAL (Éxito)
+            if text_buffer:
+                text_buffer = re.sub(r'(?m)^\s*[\-\*•>]\s*$', '', text_buffer)
+                yield text_buffer
 
-        # C. FOOTER
-        if unique_footer_sources:
-            yield "\n\n---\n**Fuentes Consultadas:**\n"
-            for url, title in unique_footer_sources.items():
-                yield f"- [{title}]({url})\n"
+            if unique_footer_sources:
+                yield "\n\n---\n**Fuentes Consultadas:**\n"
+                for url, title in unique_footer_sources.items():
+                    yield f"- [{title}]({url})\n"
+            
+            # Si completamos el bucle sin error, salimos del retry
+            return
 
-    except Exception as e:
-        log.error(f"Error en Gemini Client: {str(e)}", exc_info=True)
-        yield "Hubo un problema al contactar al servicio de IA."
+        except (ResourceExhausted, ServiceUnavailable, Aborted, InternalServerError) as e:
+            # --- LÓGICA DE REINTENTO ---
+            log.warning(f"Error de saturación Vertex AI ({type(e).__name__}): {e}")
+            
+            if attempt < MAX_RETRIES:
+                # Calculamos espera: Base * (2 ^ intento) + Jitter aleatorio
+                # Ej: 2s -> 4s -> 8s (más unos milisegundos aleatorios para no colisionar)
+                wait_time = (BASE_DELAY * (2 ** attempt)) + random.uniform(0, 1)
+                log.info(f"Reintentando en {wait_time:.2f} segundos...")
+                
+                # Yield opcional para avisar al usuario (o mantenerlo en espera transparente)
+                # yield f" [Red ocupada, reintentando en {int(wait_time)}s...] " 
+                
+                await asyncio.sleep(wait_time)
+                continue # Vuelve al inicio del `for`
+            else:
+                # Se acabaron los intentos
+                log.error("Se agotaron los reintentos de conexión con Vertex AI.")
+                yield f"Error: El servicio de IA está saturado en este momento tras {MAX_RETRIES} intentos. Por favor, intenta de nuevo en un minuto."
+                return
+
+        except Exception as e:
+            # Errores no recuperables (ej: Prompt bloqueado, error de código)
+            log.error(f"Error irrecuperable en Gemini Client: {str(e)}", exc_info=True)
+            yield "Hubo un problema inesperado al generar la respuesta."
+            return
