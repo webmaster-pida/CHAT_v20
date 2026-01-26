@@ -17,7 +17,7 @@ from typing import List, AsyncGenerator, Set
 from src.config import settings, log
 from src.models.chat_models import ChatMessage
 
-# --- INICIALIZACIÓN DEL CLIENTE Y MODELO ---
+# --- INICIALIZACIÓN ---
 try:
     vertexai.init(project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_LOCATION)
 
@@ -27,7 +27,6 @@ try:
         top_p=settings.TOP_P,
     )
 
-    # CONFIGURACIÓN SIN CENSURA (BLOCK_NONE)
     safety_settings = {
         HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
         HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
@@ -42,7 +41,7 @@ except Exception as e:
     log.critical(f"No se pudo inicializar Vertex AI o cargar el modelo: {e}", exc_info=True)
     model = None
 
-# --- FUNCIONES AUXILIARES ---
+# --- UTILS ---
 
 def prepare_history_for_vertex(history: List[ChatMessage]) -> List[Content]:
     vertex_history = []
@@ -84,7 +83,7 @@ async def generate_streaming_response(
 
         async for chunk in response_stream:
             
-            # A. METADATOS (Footer)
+            # A. METADATOS
             if chunk.candidates and chunk.candidates[0].grounding_metadata:
                 metadata = chunk.candidates[0].grounding_metadata
                 if hasattr(metadata, 'grounding_chunks'):
@@ -94,7 +93,7 @@ async def generate_streaming_response(
                             title = g_chunk.web.title or "Fuente Web"
                             unique_footer_sources[url] = title
 
-            # B. PROCESAMIENTO Y LIMPIEZA
+            # B. PROCESAMIENTO
             try:
                 if chunk.text:
                     text_buffer += chunk.text
@@ -108,40 +107,46 @@ async def generate_streaming_response(
                                 return True
                         return False
 
-                    # --- 2. LIMPIEZA DE LINKS (MARKDOWN Y RAW) ---
-                    # Markdown: [Texto](URL)
+                    # --- 2. ELIMINAR LINKS NO CONFIABLES ---
+                    # Markdown [Texto](URL) -> Texto
                     md_pattern = r'\[([^\]]+)\]\s*\(\s*(https?://[^\s\)]+)\s*\)'
                     def replace_markdown_link(match):
+                        # Si es confiable, devolvemos todo el match. Si no, solo el texto.
                         return match.group(0) if is_url_trusted(match.group(2)) else match.group(1)
                     text_buffer = re.sub(md_pattern, replace_markdown_link, text_buffer)
 
-                    # URLs Sueltas: https://...
+                    # URLs sueltas -> Vacío
                     raw_pattern = r'(?<!\()(https?://[^\s\)]+)' 
                     def replace_raw_url(match):
                         return match.group(0) if is_url_trusted(match.group(0)) else ""
                     text_buffer = re.sub(raw_pattern, replace_raw_url, text_buffer)
-
-                    # --- 3. LIMPIEZA DE VIÑETAS/BULLETS HUÉRFANOS (LO QUE SEÑALASTE) ---
-                    # Elimina viñetas (•, *, -) que queden solas al final de una línea o bloque
-                    # o que estén seguidas solo por espacios (típico cuando borramos el link que seguía).
-                    text_buffer = re.sub(r'^\s*[•*\-]\s*$', '', text_buffer, flags=re.MULTILINE)
-                    text_buffer = re.sub(r'\s+[•*\-]\s*$', '', text_buffer) 
                     
-                    # Elimina viñetas que quedaron antes de un salto de línea doble
-                    text_buffer = re.sub(r'\n\s*[•*\-]\s*\n', '\n', text_buffer)
-
-                    # --- 4. LIMPIEZA DE ARTIFACTS DE CITAS ([1]) ---
+                    # Citas [1] -> Vacío
                     text_buffer = re.sub(r'\s?\[\s*\d+\s*\]', '', text_buffer)
 
-                    # --- 5. BUFFER STREAMING ---
-                    # Retenemos el texto si termina en caracteres peligrosos que podrían ser el inicio de algo
-                    if len(text_buffer) < 300: # Aumentamos buffer para atrapar bullets colgados
-                        # Si termina en un posible inicio de viñeta o link, esperamos
-                        if any(text_buffer.endswith(c) for c in ['[', '(', '•', '-', '*', ' ']):
+                    # --- 3. AGGRESSIVE STRUCTURE CLEANING (La solución a los íconos rojos) ---
+                    
+                    # A. Eliminar líneas que son SOLO viñetas o bloques vacíos
+                    # Esto borra líneas como "* ", "- ", "> " o "• " que quedaron vacías tras borrar el link.
+                    # (?m) activa modo multilínea para que ^ y $ funcionen por línea.
+                    text_buffer = re.sub(r'(?m)^\s*[\-\*•>]\s*$', '', text_buffer)
+                    
+                    # B. Eliminar bloques de cita anidados vacíos o rotos (causa frecuente de artifacts)
+                    text_buffer = re.sub(r'(?m)^\s*>\s*>\s*$', '', text_buffer)
+                    
+                    # C. Eliminar Negritas vacías que quedan tras borrar contenido (** **)
+                    text_buffer = re.sub(r'\*\*\s*\*\*', '', text_buffer)
+
+                    # D. Eliminar dobles saltos de línea excesivos causados por borrar líneas enteras
+                    text_buffer = re.sub(r'\n\s*\n\s*\n', '\n\n', text_buffer)
+
+                    # --- 4. STREAMING ---
+                    # Buffer de seguridad para no cortar estructuras a la mitad
+                    if len(text_buffer) < 400: 
+                        if any(text_buffer.strip().endswith(c) for c in ['[', '(', '*', '-', '>', '•']):
                             continue
-                        else:
-                            yield text_buffer
-                            text_buffer = ""
+                        yield text_buffer
+                        text_buffer = ""
                     else:
                         yield text_buffer
                         text_buffer = ""
@@ -149,10 +154,10 @@ async def generate_streaming_response(
             except Exception:
                 continue
         
-        # 3. VACIAR BUFFER FINAL
+        # 3. VACIAR BUFFER FINAL CON LIMPIEZA FINAL
         if text_buffer:
-            # Última pasada agresiva para limpiar bullets finales
-            text_buffer = re.sub(r'\s*[•*\-]\s*$', '', text_buffer)
+            # Última pasada para matar viñetas colgadas al final
+            text_buffer = re.sub(r'(?m)^\s*[\-\*•>]\s*$', '', text_buffer)
             yield text_buffer
 
         # C. FOOTER
