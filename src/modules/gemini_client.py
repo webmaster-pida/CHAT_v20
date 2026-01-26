@@ -64,7 +64,7 @@ async def generate_streaming_response(
         yield "Error: El modelo de IA no está configurado correctamente."
         return
 
-    # RETRY LOGIC (Backoff Exponencial para error 429)
+    # RETRY LOGIC
     MAX_RETRIES = 3
     BASE_DELAY = 2 
 
@@ -73,8 +73,6 @@ async def generate_streaming_response(
 
     for attempt in range(MAX_RETRIES + 1):
         try:
-            # chat = model.start_chat(history=history, response_validation=False) 
-            # NOTA: response_validation=False evita bloqueo por Copyright/Recitation
             chat = model.start_chat(history=history, response_validation=False)
             
             response_stream = await chat.send_message_async(
@@ -89,7 +87,6 @@ async def generate_streaming_response(
             text_buffer = "" 
 
             async for chunk in response_stream:
-                # A. METADATOS
                 if chunk.candidates and chunk.candidates[0].grounding_metadata:
                     metadata = chunk.candidates[0].grounding_metadata
                     if hasattr(metadata, 'grounding_chunks'):
@@ -99,11 +96,10 @@ async def generate_streaming_response(
                                 title = g_chunk.web.title or "Fuente Web"
                                 unique_footer_sources[url] = title
 
-                # B. PROCESAMIENTO
                 if chunk.text:
                     text_buffer += chunk.text
                     
-                    # --- WHITELIST LOGIC ---
+                    # --- CLEANING LOGIC ---
                     def is_url_trusted(url_to_check):
                         clean_check = url_to_check.lower().strip().rstrip('/')
                         for t_url in trusted_urls:
@@ -112,7 +108,6 @@ async def generate_streaming_response(
                                 return True
                         return False
 
-                    # --- CLEANING RULES ---
                     # 1. Links Markdown
                     md_pattern = r'\[([^\]]+)\]\s*\(\s*(https?://[^\s\)]+)\s*\)'
                     def replace_markdown_link(match):
@@ -128,17 +123,19 @@ async def generate_streaming_response(
                     # 3. Artifacts de Citas [1]
                     text_buffer = re.sub(r'\s?\[\s*\d+\s*\]', '', text_buffer)
 
-                    # 4. LIMPIEZA DE ARTIFACTS DE RAG (Nuevo)
-                    # Elimina los símbolos < > si quedaron rodeando el título
-                    text_buffer = text_buffer.replace(" <", " \"").replace("> ", "\" ")
-                    # Repara bolding roto: "**Texto**," -> si falta el cierre
-                    text_buffer = re.sub(r'<\s*([^>]+)\s*>\*\*', r'"\1"**', text_buffer)
+                    # 4. REPARACIÓN DE MARKDOWN ROTO (Solución a tu imagen)
+                    # Reemplaza ">**" por "**" (cierre de negrita sucio)
+                    text_buffer = text_buffer.replace(">**", "**")
+                    # Reemplaza "<" por comilla si parece inicio de título
+                    text_buffer = text_buffer.replace(" <", " \"")
+                    # Reemplaza ">" por comilla si parece fin de título
+                    text_buffer = text_buffer.replace("> ", "\" ")
+                    # Elimina asteriscos huérfanos al final de línea
+                    text_buffer = re.sub(r'\*\*\s*$', '', text_buffer, flags=re.MULTILINE)
 
                     # 5. AGGRESSIVE STRUCTURE CLEANING
-                    # Elimina líneas vacías con bullets o bloques
                     text_buffer = re.sub(r'(?m)^\s*[\-\*•>]\s*$', '', text_buffer)
                     text_buffer = re.sub(r'(?m)^\s*>\s*>\s*$', '', text_buffer)
-                    text_buffer = re.sub(r'\*\*\s*\*\*', '', text_buffer) # Bolds vacíos
                     text_buffer = re.sub(r'\n\s*\n\s*\n', '\n\n', text_buffer)
 
                     # 6. BUFFERING
@@ -151,7 +148,6 @@ async def generate_streaming_response(
                         yield text_buffer
                         text_buffer = ""
 
-            # FINAL BUFFER FLUSH
             if text_buffer:
                 text_buffer = re.sub(r'(?m)^\s*[\-\*•>]\s*$', '', text_buffer)
                 yield text_buffer
@@ -161,7 +157,7 @@ async def generate_streaming_response(
                 for url, title in unique_footer_sources.items():
                     yield f"- [{title}]({url})\n"
             
-            return # Éxito, salimos del bucle de reintentos
+            return 
 
         except (ResourceExhausted, ServiceUnavailable, Aborted, InternalServerError) as e:
             log.warning(f"Vertex AI Error ({type(e).__name__}): {e} - Reintentando...")
