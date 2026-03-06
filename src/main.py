@@ -560,12 +560,14 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
         uid = current_user["uid"]
         
         price_id = data.get("priceId")
-        # 🛡️ CORRECCIÓN SPOOFING: Jamás confiar en el plan enviado por frontend
-        # Identificamos el plan real basándonos en el precio que pagará
         plan_key = STRIPE_PRICE_MAP.get(price_id, "basico") 
-        
         customer_name = data.get("name", "") 
         user_promo_code = data.get("promotion_code", "").strip()
+        
+        # 🛡️ RECIBIMOS LA TARJETA YA VALIDADA DESDE EL FRONTEND
+        payment_method_id = data.get("paymentMethodId")
+        if not payment_method_id:
+            raise HTTPException(status_code=400, detail="Es necesario un método de pago válido.")
 
         customer = None
         search_query = f"metadata['firebaseUID']:'{uid}' OR metadata['uid']:'{uid}'"
@@ -577,21 +579,18 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             if existing_customers.data:
                 customer = existing_customers.data[0]
 
-        # 🛡️ CORRECCIÓN SPOOFING TRIAL: Definir días de prueba en el backend y verificar histórico
         trial_days = 5
         trial_historico_usado = False
         try:
             if customer:
                 customer_doc = await db.collection("customers").document(uid).get()
-                if customer_doc.exists:
-                    doc_data = customer_doc.to_dict()
-                    if doc_data.get("trial_used", False) is True:
-                        trial_historico_usado = True
+                if customer_doc.exists and customer_doc.to_dict().get("trial_used", False) is True:
+                    trial_historico_usado = True
         except Exception as e:
             log.error(f"Error verificando trial histórico: {e}")
 
         if trial_historico_usado:
-            trial_days = 0 # Se le niega la prueba gratuita, cobro inmediato.
+            trial_days = 0 
 
         if not customer:
             customer = stripe.Customer.create(
@@ -609,43 +608,45 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             if promos.data: 
                 promo_obj = promos.data[0]
                 coupon_id = promo_obj.coupon.id
-                
                 try:
                     coupon = stripe.Coupon.retrieve(coupon_id)
                     allowed_plans_meta = coupon.metadata.get("allowed_plans")
-                    
                     if allowed_plans_meta:
                         allowed_list = [p.strip().lower() for p in allowed_plans_meta.split(",")]
                         if plan_key.lower() not in allowed_list:
-                            raise HTTPException(
-                                status_code=400, 
-                                detail=f"El cupón no es válido para el plan {plan_key}."
-                            )
+                            raise HTTPException(status_code=400, detail=f"Cupón inválido para el plan {plan_key}.")
                 except Exception as e:
                     if isinstance(e, HTTPException): raise e
-                    print(f"Warning validando cupón en checkout: {e}")
-
                 promo_id = promo_obj.id
             else:
                 raise HTTPException(status_code=400, detail=f"Código promocional inválido.")
 
+        # 🛡️ ADJUNTAMOS LA TARJETA AL CLIENTE ANTES DE CREAR LA SUSCRIPCIÓN
+        stripe.PaymentMethod.attach(payment_method_id, customer=customer.id)
+        stripe.Customer.modify(
+            customer.id,
+            invoice_settings={"default_payment_method": payment_method_id}
+        )
+
+        # 🛡️ CREAMOS LA SUSCRIPCIÓN (Ya no se creará vacía, nacerá con la tarjeta pegada)
         subscription = stripe.Subscription.create(
             customer=customer.id,
             items=[{'price': price_id}],
             trial_period_days=trial_days if trial_days > 0 else None,
             promotion_code=promo_id, 
-            payment_behavior='default_incomplete',
-            payment_settings={'save_default_payment_method': 'on_subscription'},
+            default_payment_method=payment_method_id, # Forzamos a que use la tarjeta
             expand=['latest_invoice.payment_intent', 'pending_setup_intent'], 
             metadata={"uid": uid, "plan_key": plan_key}
         )
 
-        if trial_days > 0 and subscription.pending_setup_intent:
-            client_secret = subscription.pending_setup_intent.client_secret
-        else:
-            client_secret = subscription.latest_invoice.payment_intent.client_secret
+        # Si el banco del cliente exige verificación de 2 pasos (3D Secure)
+        if subscription.status == 'incomplete' and subscription.latest_invoice and subscription.latest_invoice.payment_intent:
+            return {"clientSecret": subscription.latest_invoice.payment_intent.client_secret, "requiresAction": True}
+        
+        if subscription.status == 'trialing' and subscription.pending_setup_intent:
+             return {"clientSecret": subscription.pending_setup_intent.client_secret, "requiresAction": True}
             
-        return {"subscriptionId": subscription.id, "clientSecret": client_secret}
+        return {"subscriptionId": subscription.id, "success": True, "requiresAction": False}
 
     except HTTPException as he:
         raise he
