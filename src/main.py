@@ -191,12 +191,13 @@ def create_chat_pdf_sync(chat_text: str, title: str) -> tuple[bytes, str, str]:
 async def verify_active_subscription(current_user: Dict[str, Any]):
     user_id = current_user.get("uid")
     user_email = current_user.get("email", "").strip().lower()
+    email_verified = current_user.get("email_verified", False)
     
     admin_domains = settings.ADMIN_DOMAINS
     admin_emails = settings.ADMIN_EMAILS
     email_domain = user_email.split("@")[-1] if "@" in user_email else ""
 
-    if (email_domain in admin_domains) or (user_email in admin_emails):
+    if email_verified and ((email_domain in admin_domains) or (user_email in admin_emails)):
         return
 
     try:
@@ -209,10 +210,6 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
     except Exception as e:
         log.error(f"Error Verificación: {e}")
         raise HTTPException(status_code=500, detail="Error de servidor.")
-    except HTTPException as http_exc: raise http_exc
-    except Exception as e:
-        log.error(f"Error verificando suscripción DB: {e}")
-        raise HTTPException(status_code=500, detail="Error interno verificando suscripción.")
 
 def get_date_utc_minus_6() -> str:
     utc_now = datetime.now(timezone.utc)
@@ -252,12 +249,26 @@ async def consume_chat_credit(user_id: str, plan: str):
     await check_and_increment(transaction, stats_ref)
 
 async def refund_chat_credit(user_id: str):
-    """Reembolsa el crédito si la petición a la IA falló por completo."""
+    """Reembolsa el crédito asegurando que nunca baje de cero."""
     today = get_date_utc_minus_6()
     stats_ref = db.collection('users').document(user_id).collection('usage_stats').document(today)
-    await stats_ref.set({
-        'chat_count': firestore.Increment(-1)
-    }, merge=True)
+    
+    @firestore.async_transactional
+    async def check_and_decrement(transaction, ref):
+        snapshot = await ref.get(transaction=transaction)
+        if snapshot.exists:
+            current_count = snapshot.get('chat_count', 0)
+            if current_count > 0:
+                transaction.update(ref, {
+                    'chat_count': current_count - 1,
+                    'last_updated': firestore.SERVER_TIMESTAMP
+                })
+    
+    try:
+        transaction = db.transaction()
+        await check_and_decrement(transaction, stats_ref)
+    except Exception as e:
+        log.error(f"Error procesando reembolso de crédito para {user_id}: {e}")
 
 # --- GENERADOR STREAMING ---
 async def stream_chat_response_generator(chat_request: ChatRequest, country_code: str | None, user: Dict[str, Any], convo_id: str):
@@ -377,13 +388,14 @@ async def chat_stream_handler(
     country_code = request.headers.get('X-Country-Code', None)
     user_id = current_user['uid']
     user_email = current_user.get('email', '').strip().lower()
+    email_verified = current_user.get("email_verified", False)
     user_plan = 'none' 
 
     admin_domains = settings.ADMIN_DOMAINS
     admin_emails = settings.ADMIN_EMAILS
     email_domain = user_email.split("@")[-1] if "@" in user_email else ""
 
-    if (email_domain in admin_domains) or (user_email in admin_emails):
+    if email_verified and ((email_domain in admin_domains) or (user_email in admin_emails)):
         user_plan = 'vip'
     else:
         try:
@@ -452,10 +464,11 @@ async def download_chat(
 @app.post("/check-vip-access", tags=["Security"])
 async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_current_user)):
     user_email = current_user.get("email", "").strip().lower()
+    email_verified = current_user.get("email_verified", False)
     admin_domains = settings.ADMIN_DOMAINS
     admin_emails = settings.ADMIN_EMAILS
     email_domain = user_email.split("@")[-1] if "@" in user_email else ""
-    if (email_domain in admin_domains) or (user_email in admin_emails):
+    if email_verified and ((email_domain in admin_domains) or (user_email in admin_emails)):
         return {"is_vip_user": True}
     return {"is_vip_user": False}
 
@@ -551,7 +564,6 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
         # Identificamos el plan real basándonos en el precio que pagará
         plan_key = STRIPE_PRICE_MAP.get(price_id, "basico") 
         
-        trial_days = int(data.get("trial_period_days", 0))
         customer_name = data.get("name", "") 
         user_promo_code = data.get("promotion_code", "").strip()
 
@@ -564,6 +576,22 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             existing_customers = stripe.Customer.list(email=user_email, limit=1)
             if existing_customers.data:
                 customer = existing_customers.data[0]
+
+        # 🛡️ CORRECCIÓN SPOOFING TRIAL: Definir días de prueba en el backend y verificar histórico
+        trial_days = 5
+        trial_historico_usado = False
+        try:
+            if customer:
+                customer_doc = await db.collection("customers").document(uid).get()
+                if customer_doc.exists:
+                    doc_data = customer_doc.to_dict()
+                    if doc_data.get("trial_used", False) is True:
+                        trial_historico_usado = True
+        except Exception as e:
+            log.error(f"Error verificando trial histórico: {e}")
+
+        if trial_historico_usado:
+            trial_days = 0 # Se le niega la prueba gratuita, cobro inmediato.
 
         if not customer:
             customer = stripe.Customer.create(
@@ -658,13 +686,18 @@ async def stripe_webhook(request: Request):
                 is_active = (stripe_status in ['active', 'trialing']) and has_pm
                 is_trial = (stripe_status == 'trialing') # 🛡️ CORRECCIÓN: Indicar a Firestore que es un trial
                 
-                await db.collection("customers").document(uid).set({
+                update_data = {
                     "status": "active" if is_active else "inactive",
                     "plan": resolve_plan(subscription) if is_active else "none",
                     "stripe_status": stripe_status,
                     "has_trial": is_trial,
                     "updated_at": firestore.SERVER_TIMESTAMP
-                }, merge=True)
+                }
+                
+                if is_trial:
+                    update_data["trial_used"] = True
+
+                await db.collection("customers").document(uid).set(update_data, merge=True)
                 log.info(f"🛡️ Webhook: {uid} set to {'active' if is_active else 'inactive'} ({stripe_status})")
 
         elif event['type'] in ['customer.subscription.deleted', 'invoice.payment_failed']:
