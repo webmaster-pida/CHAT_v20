@@ -219,10 +219,10 @@ def get_date_utc_minus_6() -> str:
     cst_now = utc_now - timedelta(hours=6)
     return cst_now.strftime('%Y-%m-%d')
 
-# --- LÓGICA DE CONTROL DE LÍMITES POR PREGUNTA ---
-async def check_chat_limit(user_id: str, plan: str):
+# --- LÓGICA DE CONTROL DE LÍMITES POR PREGUNTA (CORREGIDO: TRANSACCIÓN ATÓMICA) ---
+async def consume_chat_credit(user_id: str, plan: str):
     """
-    Verifica si el usuario superó su límite diario de PREGUNTAS.
+    Verifica y consume un crédito de forma atómica para prevenir abusos de concurrencia.
     """
     plan_key = plan.lower().replace('á', 'a').strip()
     limit = CHAT_LIMITS.get(plan_key, 0)
@@ -231,26 +231,32 @@ async def check_chat_limit(user_id: str, plan: str):
 
     today = get_date_utc_minus_6()
     stats_ref = db.collection('users').document(user_id).collection('usage_stats').document(today)
-    doc = await stats_ref.get()
-    current_count = 0
     
-    if doc.exists:
-        current_count = doc.to_dict().get('chat_count', 0)
+    @firestore.async_transactional
+    async def check_and_increment(transaction, ref):
+        snapshot = await ref.get(transaction=transaction)
+        current_count = snapshot.get('chat_count') if snapshot.exists else 0
         
-    if current_count >= limit:
-        # Esto activa el modal en el frontend
-        raise HTTPException(
-            status_code=429, 
-            detail=f"Límite diario alcanzado para el plan {plan_key}"
-        )
+        if current_count >= limit:
+            raise HTTPException(
+                status_code=429, 
+                detail=f"Límite diario alcanzado para el plan {plan_key}"
+            )
+        
+        transaction.set(ref, {
+            'chat_count': current_count + 1,
+            'last_updated': firestore.SERVER_TIMESTAMP
+        }, merge=True)
 
-async def increment_chat_count(user_id: str):
-    """Incrementa el contador +1 (se llama solo tras respuesta exitosa)"""
+    transaction = db.transaction()
+    await check_and_increment(transaction, stats_ref)
+
+async def refund_chat_credit(user_id: str):
+    """Reembolsa el crédito si la petición a la IA falló por completo."""
     today = get_date_utc_minus_6()
     stats_ref = db.collection('users').document(user_id).collection('usage_stats').document(today)
     await stats_ref.set({
-        'chat_count': firestore.Increment(1),
-        'last_updated': firestore.SERVER_TIMESTAMP
+        'chat_count': firestore.Increment(-1)
     }, merge=True)
 
 # --- GENERADOR STREAMING ---
@@ -290,8 +296,6 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
             yield create_sse_event({"event": "status", "message": f"Fuente {i+1} procesada..."})
         
         # --- AQUÍ ES DONDE OCURRE LA MAGIA DE LA LISTA BLANCA ---
-        # 1. Buscamos todas las URLs que provienen de tus fuentes seguras (RAG y Vertex Search antiguo).
-        #    Estas son las únicas que permitiremos que aparezcan en azul en el texto.
         trusted_urls_list = re.findall(r'\((https?://[^\s\)]+)\)', combined_context)
         trusted_urls_set = set(trusted_urls_list)
         
@@ -301,12 +305,11 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         
         full_response_text = ""
         
-        # 2. Pasamos 'trusted_urls' a Gemini Client para que filtre lo que no esté en esa lista.
         async for chunk in gemini_client.generate_streaming_response(
             system_prompt=PIDA_SYSTEM_PROMPT,
             prompt=final_prompt,
             history=history_for_gemini,
-            trusted_urls=trusted_urls_set # <--- ¡ESTA ES LA CLAVE!
+            trusted_urls=trusted_urls_set 
         ):
             yield create_sse_event({'text': chunk})
             full_response_text += chunk
@@ -320,7 +323,6 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
 
     except Exception as e:
         log.error(f"Error crítico streaming convo {convo_id}: {e}", exc_info=True)
-        # Yield error para que el cliente (y el contador) lo sepan
         error_message = json.dumps({"error": "Ocurrió un error interno al generar la respuesta."})
         yield f"data: {error_message}\n\n"
 
@@ -328,7 +330,7 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
 
 @app.get("/status", tags=["Status"])
 def read_status():
-    return {"status": "ok", "message": "PIDA Chat Backend v3.0 (PDF Fixed)"}
+    return {"status": "ok", "message": "PIDA Chat Backend v3.0 (Security Patched)"}
 
 @app.get("/conversations", response_model=List[Dict[str, Any]], tags=["Chat History"])
 async def get_user_conversations(current_user: Dict[str, Any] = Depends(get_current_user)):
@@ -342,7 +344,6 @@ async def get_conversation_details(convo_id: str, current_user: Dict[str, Any] =
 
 @app.post("/conversations", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED, tags=["Chat History"])
 async def create_new_empty_conversation(request: Request, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """Crea una conversación vacía. NO incrementa contador aquí."""
     await verify_active_subscription(current_user)
     body = await request.json()
     title = body.get("title", "Nuevo Chat")
@@ -365,7 +366,7 @@ async def update_conversation_title_handler(convo_id: str, request: Request, cur
     await firestore_client.update_conversation_title(current_user['uid'], convo_id, new_title)
     return
 
-# --- ENDPOINT DEL CHAT MODIFICADO CON CONTROL DE LÍMITES POR PREGUNTA ---
+# --- ENDPOINT DEL CHAT MODIFICADO CON PROTECCIÓN ATÓMICA DE LÍMITES ---
 @app.post("/chat-stream/{convo_id}", tags=["Chat"])
 async def chat_stream_handler(
     convo_id: str, 
@@ -373,15 +374,11 @@ async def chat_stream_handler(
     request: Request, 
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    # 1. Recuperar el Country Code
     country_code = request.headers.get('X-Country-Code', None)
-
-    # 2. Obtener el ID y el Plan del Usuario
     user_id = current_user['uid']
     user_email = current_user.get('email', '').strip().lower()
     user_plan = 'none' 
 
-    # --- LÓGICA DE DETECCIÓN VIP ---
     admin_domains = settings.ADMIN_DOMAINS
     admin_emails = settings.ADMIN_EMAILS
     email_domain = user_email.split("@")[-1] if "@" in user_email else ""
@@ -400,36 +397,31 @@ async def chat_stream_handler(
         except Exception as e:
             log.error(f"Error obteniendo plan usuario: {e}")
 
-    # 3. VERIFICAR LÍMITE (Aquí se detiene y lanza error 429 si ya no tiene saldo)
-    await check_chat_limit(user_id, user_plan)
+    # 3. CONSUMO ATÓMICO DEL CRÉDITO (Previene abusos de concurrencia)
+    await consume_chat_credit(user_id, user_plan)
 
-    # 4. Generador Envoltorio (Para contar el uso SOLO si hay respuesta exitosa)
     async def counted_stream_generator():
         has_error = False
         full_content_received = False
         
-        # Llamamos a la IA pasando el country_code
-        async for chunk in stream_chat_response_generator(
-            chat_request, 
-            country_code, 
-            current_user, 
-            convo_id
-        ):
-            # Detectar si el chunk reporta un error
-            if '"error":' in chunk:
-                has_error = True
-            
-            # Detectar si estamos recibiendo contenido real (no solo eventos de estado)
-            if '"text":' in chunk and not has_error:
-                full_content_received = True
+        try:
+            async for chunk in stream_chat_response_generator(
+                chat_request, 
+                country_code, 
+                current_user, 
+                convo_id
+            ):
+                if '"error":' in chunk:
+                    has_error = True
                 
-            yield chunk
-            
-        # SOLO INCREMENTAMOS SI:
-        # 1. No hubo errores
-        # 2. Se recibió contenido real
-        if not has_error and full_content_received:
-            asyncio.create_task(increment_chat_count(user_id))
+                if '"text":' in chunk and not has_error:
+                    full_content_received = True
+                    
+                yield chunk
+        finally:
+            # Si el proceso falla por completo (ej. caída de Gemini), reembolsamos el crédito cobrado al inicio.
+            if has_error or not full_content_received:
+                asyncio.create_task(refund_chat_credit(user_id))
 
     headers = { 
         "Content-Type": "text/event-stream", 
@@ -469,88 +461,53 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
 
 @app.post("/validate-promo-code", tags=["Billing"])
 async def validate_promo_code(request: Request):
-    """
-    Valida cupón usando Metadatos y el mapa de precios plano de Python.
-    """
     try:
         data = await request.json()
         promo_code = data.get("code", "").strip()
         price_id = data.get("priceId")
 
-        print(f"--- VALIDANDO CUPÓN (METADATA FIXED) ---")
-        print(f"Código: {promo_code} | Precio ID: {price_id}")
-
         if not promo_code or not price_id:
             raise HTTPException(status_code=400, detail="Faltan datos requeridos.")
 
-        # 1. Identificar el Plan Interno (CORREGIDO)
-        # STRIPE_PRICE_MAP en Python es { "price_id": "nombre_plan" }
-        # No necesitamos bucles, solo un acceso directo.
         current_plan_name = STRIPE_PRICE_MAP.get(price_id)
-        
-        print(f"Plan Identificado internamente: {current_plan_name}")
 
         if not current_plan_name:
-             # Si el ID no está en nuestro mapa, es un error de configuración o el ID cambió
              raise HTTPException(status_code=400, detail="El plan seleccionado no es válido en el sistema.")
 
-        # 2. Buscar el código de promoción en Stripe
         promos = stripe.PromotionCode.list(code=promo_code, active=True, limit=1)
-        
         if not promos.data:
             raise HTTPException(status_code=404, detail="El código promocional no es válido o ha expirado.")
 
         promo_obj = promos.data[0]
         coupon_id = promo_obj.coupon.id
         
-        # 3. Recuperar cupón explícitamente
         try:
             coupon = stripe.Coupon.retrieve(coupon_id)
         except Exception as e:
-            print(f"Error recuperando cupón: {e}")
             raise HTTPException(status_code=500, detail="Error de conexión con Stripe.")
 
-        # 4. VALIDACIÓN DE RESTRICCIONES (PRIORIDAD: METADATA)
-        
-        # A) Chequeo por Metadata 'allowed_plans'
         allowed_plans_meta = coupon.metadata.get("allowed_plans")
-        
         if allowed_plans_meta:
-            # Convertimos "premium, avanzado" en lista ['premium', 'avanzado']
             allowed_list = [p.strip().lower() for p in allowed_plans_meta.split(",")]
-            print(f"Planes permitidos por Metadata: {allowed_list}")
-            
             if current_plan_name not in allowed_list:
-                print(f"❌ BLOQUEO POR METADATA: {current_plan_name} no está en {allowed_list}")
                 raise HTTPException(
                     status_code=400, 
                     detail=f"Este cupón solo es válido para el plan {allowed_plans_meta.upper()}."
                 )
-            else:
-                print("✅ Validación Metadata Exitosa.")
-        
-        # B) Chequeo nativo (Fallback)
         elif coupon.get("applies_to"):
             try:
                 price_obj = stripe.Price.retrieve(price_id)
                 current_product_id = price_obj.product
                 allowed_products = coupon.applies_to.get("products", [])
-                
                 if allowed_products and current_product_id not in allowed_products:
-                    print(f"❌ BLOQUEO NATIVO: Producto {current_product_id} no permitido.")
                     raise HTTPException(status_code=400, detail="Código no válido para este plan.")
             except Exception:
                 pass 
 
-        else:
-            print("⚠️ Advertencia: Cupón sin restricciones explícitas. Se aplicará.")
-
-        # 5. Obtener precio para cálculo
         price_obj = stripe.Price.retrieve(price_id)
         original_amount = price_obj.unit_amount 
         currency = price_obj.currency.upper()
 
-        # 6. Cálculo matemático
         final_amount = original_amount
         discount_desc = ""
 
@@ -558,11 +515,9 @@ async def validate_promo_code(request: Request):
             discount_amount = int(round(original_amount * (coupon.percent_off / 100)))
             final_amount = original_amount - discount_amount
             discount_desc = f"-{coupon.percent_off}%"
-        
         elif coupon.amount_off:
             if coupon.currency.upper() != currency:
                 raise HTTPException(status_code=400, detail=f"Moneda incorrecta.")
-            
             final_amount = original_amount - coupon.amount_off
             discount_desc = f"-${coupon.amount_off / 100:.2f} {currency}"
 
@@ -583,7 +538,6 @@ async def validate_promo_code(request: Request):
         raise he
     except Exception as e:
         log.error(f"Error validando promo: {e}")
-        print(f"EXCEPTION FINAL: {e}")
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 @app.post("/create-payment-intent", tags=["Billing"])
@@ -593,27 +547,24 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
         uid = current_user["uid"]
         
         price_id = data.get("priceId")
-        plan_key = data.get("plan_key", "unknown") # 'basico', 'avanzado', 'premium'
+        # 🛡️ CORRECCIÓN SPOOFING: Jamás confiar en el plan enviado por frontend
+        # Identificamos el plan real basándonos en el precio que pagará
+        plan_key = STRIPE_PRICE_MAP.get(price_id, "basico") 
+        
         trial_days = int(data.get("trial_period_days", 0))
         customer_name = data.get("name", "") 
         user_promo_code = data.get("promotion_code", "").strip()
 
-        # ---------------------------------------------------------
-        # 1. GESTIÓN DEL CLIENTE (Lógica original intacta)
-        # ---------------------------------------------------------
         customer = None
-        # Buscar por metadatos (prioridad)
         search_query = f"metadata['firebaseUID']:'{uid}' OR metadata['uid']:'{uid}'"
         search_result = stripe.Customer.search(query=search_query, limit=1)
         if search_result.data:
             customer = search_result.data[0]
         else:
-            # Buscar por email (fallback)
             existing_customers = stripe.Customer.list(email=user_email, limit=1)
             if existing_customers.data:
                 customer = existing_customers.data[0]
 
-        # Crear si no existe
         if not customer:
             customer = stripe.Customer.create(
                 email=user_email, 
@@ -621,61 +572,40 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
                 metadata={"uid": uid, "firebaseUID": uid}
             )
         else:
-            # Actualizar nombre si cambió
             if customer_name and customer.name != customer_name:
                 stripe.Customer.modify(customer.id, name=customer_name)
 
-        # ---------------------------------------------------------
-        # 2. GESTIÓN DE PROMOCIÓN (Lógica MEJORADA con seguridad)
-        # ---------------------------------------------------------
         promo_id = None
-        
         if user_promo_code:
-            # Buscar el código en Stripe
             promos = stripe.PromotionCode.list(code=user_promo_code, active=True, limit=1)
-            
             if promos.data: 
                 promo_obj = promos.data[0]
                 coupon_id = promo_obj.coupon.id
                 
-                # --- NUEVA VALIDACIÓN DE SEGURIDAD ---
-                # Recuperamos el cupón para leer 'allowed_plans' desde metadata
-                # Esto evita que se use un cupón Premium en un plan Básico vía API directa
                 try:
                     coupon = stripe.Coupon.retrieve(coupon_id)
                     allowed_plans_meta = coupon.metadata.get("allowed_plans")
                     
                     if allowed_plans_meta:
-                        # Convertir "premium, avanzado" a lista
                         allowed_list = [p.strip().lower() for p in allowed_plans_meta.split(",")]
-                        
-                        # Validar contra el plan que se está comprando (plan_key)
                         if plan_key.lower() not in allowed_list:
-                            print(f"🚨 BLOQUEO DE SEGURIDAD: Cupón restringido usado en plan incorrecto.")
                             raise HTTPException(
                                 status_code=400, 
                                 detail=f"El cupón no es válido para el plan {plan_key}."
                             )
                 except Exception as e:
-                    # Si falla la validación explícita (HTTPException), la dejamos pasar.
-                    # Si es error de conexión, logueamos pero no detenemos (fallback seguro).
                     if isinstance(e, HTTPException): raise e
                     print(f"Warning validando cupón en checkout: {e}")
 
-                # Si pasa la validación, asignamos el ID para el cobro
                 promo_id = promo_obj.id
             else:
-                # El usuario envió un código pero no existe en Stripe
                 raise HTTPException(status_code=400, detail=f"Código promocional inválido.")
 
-        # ---------------------------------------------------------
-        # 3. CREAR SUSCRIPCIÓN (Lógica original intacta)
-        # ---------------------------------------------------------
         subscription = stripe.Subscription.create(
             customer=customer.id,
             items=[{'price': price_id}],
             trial_period_days=trial_days if trial_days > 0 else None,
-            promotion_code=promo_id, # Stripe aplica el descuento matemático aquí
+            promotion_code=promo_id, 
             payment_behavior='default_incomplete',
             payment_settings={'save_default_payment_method': 'on_subscription'},
             expand=['latest_invoice.payment_intent', 'pending_setup_intent'], 
@@ -701,7 +631,6 @@ async def stripe_webhook(request: Request):
     sig_header = request.headers.get("Stripe-Signature")
     
     try:
-        # 1. Validar firma
         webhook_secret = settings.STRIPE_WEBHOOK_SECRET 
         if not webhook_secret:
             log.error("⚠️ STRIPE_WEBHOOK_SECRET no está configurado en las variables de entorno.")
@@ -722,18 +651,18 @@ async def stripe_webhook(request: Request):
             uid = subscription.get('metadata', {}).get('uid')
             stripe_status = subscription.get('status')
             
-            # CRÍTICO: Una suscripción solo es válida si Stripe confirma el pago/trial 
-            # Y existe un método de pago vinculado (evita el bypass de tarjetas falsas)
             has_pm = subscription.get('default_payment_method') is not None or \
                      subscription.get('default_source') is not None
             
             if uid:
                 is_active = (stripe_status in ['active', 'trialing']) and has_pm
+                is_trial = (stripe_status == 'trialing') # 🛡️ CORRECCIÓN: Indicar a Firestore que es un trial
                 
                 await db.collection("customers").document(uid).set({
                     "status": "active" if is_active else "inactive",
                     "plan": resolve_plan(subscription) if is_active else "none",
                     "stripe_status": stripe_status,
+                    "has_trial": is_trial,
                     "updated_at": firestore.SERVER_TIMESTAMP
                 }, merge=True)
                 log.info(f"🛡️ Webhook: {uid} set to {'active' if is_active else 'inactive'} ({stripe_status})")
@@ -755,7 +684,6 @@ async def stripe_webhook(request: Request):
         log.error(f"❌ Firma de Webhook inválida: {e}")
         return Response(content="Invalid signature", status_code=400)
     except Exception as e:
-        # ESTO ES LO QUE NOS DIRÁ EL ERROR REAL EN LOS LOGS
         log.error(f"💥 Error crítico en Webhook: {str(e)}", exc_info=True)
         return Response(content=str(e), status_code=500)
 
@@ -776,4 +704,3 @@ async def create_portal_session(request: Request, current_user: Dict[str, Any] =
     except Exception as e:
         log.error(f"Error generando sesión del portal: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
