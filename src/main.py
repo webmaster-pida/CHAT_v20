@@ -414,7 +414,7 @@ async def chat_stream_handler(
 
     async def counted_stream_generator():
         has_error = False
-        full_content_received = False
+        tokens_sent = False # Nuevo flag
         
         try:
             async for chunk in stream_chat_response_generator(
@@ -427,12 +427,13 @@ async def chat_stream_handler(
                     has_error = True
                 
                 if '"text":' in chunk and not has_error:
-                    full_content_received = True
+                    tokens_sent = True # Si ya empezamos a enviar respuesta, ya costó dinero/cómputo
                     
                 yield chunk
         finally:
-            # Si el proceso falla por completo (ej. caída de Gemini), reembolsamos el crédito cobrado al inicio.
-            if has_error or not full_content_received:
+            # SÓLO reembolsar si hubo un error del servidor ANTES de generar respuesta
+            # o si el usuario canceló la petición antes de que Gemini contestara.
+            if has_error or not tokens_sent:
                 asyncio.create_task(refund_chat_credit(user_id))
 
     headers = { 
@@ -446,20 +447,46 @@ async def chat_stream_handler(
 
 @app.post("/download-chat", tags=["Chat"])
 async def download_chat(
-    chat_text: str = Form(...),
-    title: str = Form(...),
+    convo_id: str = Form(...),
     file_format: str = Form("docx"),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     try:
+        user_id = current_user['uid']
+        
+        # 1. Recuperar datos desde la fuente de verdad (Firestore), no del usuario
+        messages = await firestore_client.get_conversation_messages(user_id, convo_id)
+        if not messages:
+            raise HTTPException(status_code=404, detail="Conversación no encontrada o vacía.")
+            
+        # Obtener el título (opcional, requeriría una función en firestore_client, usamos genérico por ahora)
+        title = "Exportación de Chat PIDA"
+        
+        # Reconstruir el chat_text seguro
+        chat_lines = []
+        for msg in messages:
+            role_str = "Usuario" if msg.role == "user" else "PIDA"
+            chat_lines.append(f"**{role_str}:** {msg.content}")
+            
+        chat_text = "\n\n".join(chat_lines)
+        
+        # Limitar tamaño por seguridad (Ej. max 50,000 caracteres)
+        if len(chat_text) > 50000:
+            chat_text = chat_text[:50000] + "\n\n[Texto truncado por límite de seguridad]"
+
         if file_format.lower() == "docx":
             content, mime, fname = await asyncio.to_thread(create_chat_docx_sync, chat_text, title)
         else:
             content, mime, fname = await asyncio.to_thread(create_chat_pdf_sync, chat_text, title)
+            
         return Response(content=content, media_type=mime, headers={"Content-Disposition": f"attachment; filename={fname}"})
+        
+    except HTTPException as he:
+        raise he
     except Exception as e:
         log.error(f"Error descarga chat: {e}")
         raise HTTPException(500, f"Error generando archivo: {e}")
+
 
 @app.post("/check-vip-access", tags=["Security"])
 async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_current_user)):
@@ -560,7 +587,10 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
         uid = current_user["uid"]
         
         price_id = data.get("priceId")
-        plan_key = STRIPE_PRICE_MAP.get(price_id, "basico") 
+        plan_key = STRIPE_PRICE_MAP.get(price_id) 
+        if not plan_key:
+            raise HTTPException(status_code=400, detail="ID de Precio no reconocido o alterado. Operación denegada.")
+            
         customer_name = data.get("name", "") 
         user_promo_code = data.get("promotion_code", "").strip()
         
@@ -591,6 +621,17 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
 
         if trial_historico_usado:
             trial_days = 0 
+            
+        # 🛡️ VALIDACIÓN EXTRA PARA EVITAR ABUSO DE TRIAL
+        pm = stripe.PaymentMethod.retrieve(payment_method_id)
+        pm_fingerprint = pm.card.fingerprint if pm.type == 'card' else None
+
+        if trial_days > 0 and pm_fingerprint:
+            # Buscar si este correo ya se usó en un trial en Firestore
+            existing_user_query = db.collection("customers").where("email", "==", user_email).where("trial_used", "==", True).limit(1)
+            docs = await existing_user_query.get()
+            if len(docs) > 0:
+                trial_days = 0
 
         if not customer:
             customer = stripe.Customer.create(
@@ -615,11 +656,19 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
                         allowed_list = [p.strip().lower() for p in allowed_plans_meta.split(",")]
                         if plan_key.lower() not in allowed_list:
                             raise HTTPException(status_code=400, detail=f"Cupón inválido para el plan {plan_key}.")
+                    # 🛡️ Validación nativa de Stripe agregada
+                    elif coupon.get("applies_to"):
+                        price_obj = stripe.Price.retrieve(price_id)
+                        current_product_id = price_obj.product
+                        allowed_products = coupon.applies_to.get("products", [])
+                        if allowed_products and current_product_id not in allowed_products:
+                            raise HTTPException(status_code=400, detail="El código no es válido para este nivel de plan.")
                 except Exception as e:
                     if isinstance(e, HTTPException): raise e
+                    raise HTTPException(status_code=400, detail="Error al validar restricciones del producto en Stripe.")
                 promo_id = promo_obj.id
             else:
-                raise HTTPException(status_code=400, detail=f"Código promocional inválido.")
+                raise HTTPException(status_code=400, detail=f"Código promocional inválido o expirado.")
 
         # 🛡️ ADJUNTAMOS LA TARJETA AL CLIENTE ANTES DE CREAR LA SUSCRIPCIÓN
         stripe.PaymentMethod.attach(payment_method_id, customer=customer.id)
@@ -673,7 +722,11 @@ async def stripe_webhook(request: Request):
         def resolve_plan(sub_obj):
             items = sub_obj.get('items', {}).get('data', [])
             p_id = items[0]['price']['id'] if items else None
-            return STRIPE_PRICE_MAP.get(p_id, "basico")
+            plan = STRIPE_PRICE_MAP.get(p_id)
+            if not plan:
+                log.error(f"⚠️ ALERTA DE SEGURIDAD: Webhook recibió un price_id desconocido: {p_id}")
+                return "none" # Bloquear acceso en lugar de dar plan basico
+            return plan
 
         if event['type'] in ['customer.subscription.created', 'customer.subscription.updated']:
             subscription = data_object
