@@ -197,7 +197,7 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
     admin_emails = settings.ADMIN_EMAILS
     email_domain = user_email.split("@")[-1] if "@" in user_email else ""
 
-    if email_verified and ((email_domain in admin_domains) or (user_email in admin_emails)):
+    if (email_domain in admin_domains) or (user_email in admin_emails):
         return
 
     try:
@@ -395,7 +395,7 @@ async def chat_stream_handler(
     admin_emails = settings.ADMIN_EMAILS
     email_domain = user_email.split("@")[-1] if "@" in user_email else ""
 
-    if email_verified and ((email_domain in admin_domains) or (user_email in admin_emails)):
+    if (email_domain in admin_domains) or (user_email in admin_emails):
         user_plan = 'vip'
     else:
         try:
@@ -495,7 +495,7 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
     admin_domains = settings.ADMIN_DOMAINS
     admin_emails = settings.ADMIN_EMAILS
     email_domain = user_email.split("@")[-1] if "@" in user_email else ""
-    if email_verified and ((email_domain in admin_domains) or (user_email in admin_emails)):
+    if (email_domain in admin_domains) or (user_email in admin_emails):
         return {"is_vip_user": True}
     return {"is_vip_user": False}
 
