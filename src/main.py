@@ -232,7 +232,10 @@ async def consume_chat_credit(user_id: str, plan: str):
     @firestore.async_transactional
     async def check_and_increment(transaction, ref):
         snapshot = await ref.get(transaction=transaction)
-        current_count = snapshot.get('chat_count') if snapshot.exists else 0
+        
+        # SOLUCIÓN: Convertir a diccionario y pedir el dato de forma segura
+        data = snapshot.to_dict() if snapshot.exists else {}
+        current_count = data.get('chat_count', 0)
         
         if current_count >= limit:
             raise HTTPException(
@@ -257,7 +260,10 @@ async def refund_chat_credit(user_id: str):
     async def check_and_decrement(transaction, ref):
         snapshot = await ref.get(transaction=transaction)
         if snapshot.exists:
-            current_count = snapshot.get('chat_count', 0)
+            # SOLUCIÓN: Misma lógica segura
+            data = snapshot.to_dict() or {}
+            current_count = data.get('chat_count', 0)
+            
             if current_count > 0:
                 transaction.update(ref, {
                     'chat_count': current_count - 1,
