@@ -120,8 +120,8 @@ async def generate_streaming_response(
                         return match.group(0) if is_url_trusted(match.group(0)) else ""
                     text_buffer = re.sub(raw_pattern, replace_raw_url, text_buffer)
 
-                    # 3. Artifacts de Citas [1]
-                    text_buffer = re.sub(r'\s?\[\s*\d+\s*\]', '', text_buffer)
+                    # 3. Limpieza mejorada de Artifacts de Citas: [1], (2), [3, 4], (5, 15, 16)
+                    text_buffer = re.sub(r'\s?[\[\(]\s*\d+(?:\s*,\s*\d+)*\s*[\]\)]', '', text_buffer)
 
                     # 4. REPARACIÓN DE MARKDOWN ROTO (Solución a tu imagen)
                     # Reemplaza ">**" por "**" (cierre de negrita sucio)
