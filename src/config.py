@@ -29,15 +29,6 @@ class Settings(BaseSettings):
     GOOGLE_CLOUD_LOCATION: str = "us-central1"
     GEMINI_MODEL: str = "gemini-2.5-pro"
     
-    # Vertex Search (Con valores por defecto para evitar crashes)
-    VERTEX_SEARCH_PROJECT_ID: str = "pida-ai-v20"
-    VERTEX_SEARCH_LOCATION: str = "global"
-    VERTEX_SEARCH_DATA_STORE_ID: str = "almacen-web-pida_1765039607916"
-
-    # PSE (Búsqueda antigua)
-    PSE_API_KEY: str = ""
-    PSE_ID: str = ""
-    
     # URL del RAG
     RAG_API_URL: str = "https://pida-rag-api-640849120264.us-central1.run.app/query"
 
