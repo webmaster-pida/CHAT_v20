@@ -101,14 +101,13 @@ def write_markdown_to_pdf(pdf, text):
     import re
     pdf.set_font("Arial", "", 11)
     
-    # Convertir <br> de las tablas en saltos de línea reales
-    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
-    
-    # 👇 FIX: Cálculo seguro del ancho de página para cualquier versión de FPDF
+    # Cálculo seguro del ancho de página
     try:
         effective_page_width = pdf.epw
     except AttributeError:
         effective_page_width = pdf.w - pdf.l_margin - pdf.r_margin
+        
+    text = text.replace('$', '').replace('^{a}', 'a.').replace('^{o}', 'o.')
     
     for line in text.split('\n'):
         line = line.strip()
@@ -118,7 +117,6 @@ def write_markdown_to_pdf(pdf, text):
 
         # DIBUJANTE DE TABLAS NATIVO PARA PDF
         if line.startswith('|') and line.endswith('|'):
-            # Ignorar la fila separadora de Markdown (|---|---|)
             if re.match(r'^\|?[\s\-:]+\|[\s\-:|]+$', line):
                 continue
             
@@ -126,28 +124,31 @@ def write_markdown_to_pdf(pdf, text):
             if not cols or len(cols) == 0: 
                 continue
             
-            # Usamos el ancho seguro calculado arriba
             col_width = effective_page_width / len(cols)
             x_start = pdf.get_x()
             y_start = pdf.get_y()
+            
+            # Seguro anticaídas: Si estamos muy cerca del final de la página, saltamos a la siguiente
+            if y_start > pdf.h - pdf.b_margin - 20:
+                pdf.add_page()
+                y_start = pdf.get_y()
+                
             max_y = y_start
             
             for i, col in enumerate(cols):
-                col_clean = col.replace('**', '') # Limpiamos los asteriscos
+                col_clean = col.replace('**', '')
+                # 👇 LA MAGIA: Convertimos el <br> a salto de línea AQUÍ, solo dentro de la celda
+                col_clean = re.sub(r'<br\s*/?>', '\n', col_clean, flags=re.IGNORECASE)
+                
                 pdf.set_xy(x_start + (i * col_width), y_start)
-                
-                # Si el texto original tenía negritas, ponemos la celda en negrita
                 pdf.set_font("Arial", "B" if "**" in col else "", 10)
-                
-                # multi_cell permite que el texto largo salte de línea dentro de la celda
                 pdf.multi_cell(col_width, 6, col_clean, border=1)
                 
                 if pdf.get_y() > max_y:
                     max_y = pdf.get_y()
             
-            # Mover el cursor debajo de la celda más alta para la siguiente fila
             pdf.set_y(max_y)
-            pdf.set_font("Arial", "", 11) # Restaurar fuente normal
+            pdf.set_font("Arial", "", 11)
             continue
 
         # Títulos H2
@@ -155,7 +156,9 @@ def write_markdown_to_pdf(pdf, text):
             pdf.ln(3)
             pdf.set_font("Arial", "B", 13)
             pdf.set_text_color(29, 53, 87)
-            pdf.multi_cell(0, 8, line.replace('## ', ''))
+            # Limpiamos los <br> residuales si los hay en los títulos
+            clean_line = re.sub(r'<br\s*/?>', ' ', line.replace('## ', ''), flags=re.IGNORECASE)
+            pdf.multi_cell(0, 8, clean_line)
             pdf.set_text_color(0, 0, 0)
             pdf.set_font("Arial", "", 11)
             continue
@@ -165,7 +168,8 @@ def write_markdown_to_pdf(pdf, text):
             pdf.ln(2)
             pdf.set_font("Arial", "B", 12)
             pdf.set_text_color(40, 70, 100)
-            pdf.multi_cell(0, 7, line.replace('### ', ''))
+            clean_line = re.sub(r'<br\s*/?>', ' ', line.replace('### ', ''), flags=re.IGNORECASE)
+            pdf.multi_cell(0, 7, clean_line)
             pdf.set_text_color(0, 0, 0)
             pdf.set_font("Arial", "", 11)
             continue
@@ -176,6 +180,9 @@ def write_markdown_to_pdf(pdf, text):
             line = "- " + line[2:]
         else:
             pdf.set_x(10)
+
+        # Limpiamos los <br> residuales en el texto normal
+        line = re.sub(r'<br\s*/?>', '', line, flags=re.IGNORECASE)
 
         # Negritas dinámicas
         parts = re.split(r'(\*\*.*?\*\*)', line)
@@ -215,46 +222,46 @@ def create_chat_docx_sync(chat_text: str, title: str) -> tuple:
     heading = doc.add_heading(title, 0)
     heading.style.font.color.rgb = RGBColor(29, 53, 87)
 
-    text = re.sub(r'<br\s*/?>', '\n', chat_text, flags=re.IGNORECASE)
-    text = text.replace('$', '').replace('^{a}', 'a.').replace('^{o}', 'o.')
+    text = chat_text.replace('$', '').replace('^{a}', 'a.').replace('^{o}', 'o.')
     
-    # Variables para rastrear si estamos construyendo una tabla
     in_table = False
     current_table = None
 
     for line in text.split('\n'):
         line = line.strip()
         if not line:
-            in_table = False # Si hay un salto de línea en blanco, la tabla terminó
+            in_table = False
             continue
             
-        # 👇 NUEVO: DIBUJANTE DE TABLAS NATIVO PARA WORD 👇
         if line.startswith('|') and line.endswith('|'):
             if re.match(r'^\|?[\s\-:]+\|[\s\-:|]+$', line):
-                continue # Ignorar separador
+                continue
                 
             cols = [c.strip() for c in line.strip('|').split('|')]
             
-            # Si es la primera fila de la tabla, la creamos
             if not in_table:
                 current_table = doc.add_table(rows=1, cols=len(cols))
-                current_table.style = 'Table Grid' # Estilo nativo de Word con bordes
+                current_table.style = 'Table Grid'
                 hdr_cells = current_table.rows[0].cells
                 for i, col in enumerate(cols):
                     if i < len(hdr_cells):
-                        hdr_cells[i].text = col.replace('**', '')
+                        # 👇 LA MAGIA: Limpiamos los <br> directo en la celda de Word
+                        cell_text = re.sub(r'<br\s*/?>', '\n', col.replace('**', ''), flags=re.IGNORECASE)
+                        hdr_cells[i].text = cell_text
                 in_table = True
-            # Si ya estamos en una tabla, agregamos una fila nueva
             else:
                 if current_table:
                     row_cells = current_table.add_row().cells
                     for i, col in enumerate(cols):
                         if i < len(row_cells):
-                            row_cells[i].text = col.replace('**', '')
+                            cell_text = re.sub(r'<br\s*/?>', '\n', col.replace('**', ''), flags=re.IGNORECASE)
+                            row_cells[i].text = cell_text
             continue
         else:
-            in_table = False # Si la línea no tiene '|', cerramos la tabla
-        # 👆 FIN DEL DIBUJANTE DE TABLAS 👆
+            in_table = False
+
+        # Si no es tabla, limpiamos los <br> residuales
+        line = re.sub(r'<br\s*/?>', '', line, flags=re.IGNORECASE)
 
         if line.startswith('## '):
             h = doc.add_heading(line.replace('## ', ''), level=2)
