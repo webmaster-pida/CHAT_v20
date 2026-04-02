@@ -479,32 +479,57 @@ async def download_chat(
     try:
         user_id = current_user['uid']
         
-        # 1. Recuperar datos desde la fuente de verdad (Firestore), no del usuario
+        # 1. Recuperar datos
         messages = await firestore_client.get_conversation_messages(user_id, convo_id)
         if not messages:
             raise HTTPException(status_code=404, detail="Conversación no encontrada o vacía.")
             
-        # Obtener el título (opcional, requeriría una función en firestore_client, usamos genérico por ahora)
         title = "Exportación de Chat PIDA"
         
-        # Reconstruir el chat_text seguro
+        # 2. Reconstruir el chat_text seguro
         chat_lines = []
         for msg in messages:
             role_str = "Usuario" if msg.role == "user" else "PIDA"
-            chat_lines.append(f"**{role_str}:** {msg.content}")
+            content = msg.content
+            
+            # 👇 FILTRO DE LIMPIEZA PARA EXPORTACIÓN 👇
+            if msg.role == "model":
+                # A. Ocultar el marcador de finalización interno
+                content = content.replace("_Fin del análisis._", "")
+                
+                # B. Transformar la etiqueta HTML en una lista de viñetas limpia
+                if "<pida_questions>" in content and "</pida_questions>" in content:
+                    def replacer(match):
+                        q_raw = match.group(1)
+                        # Separar por la pleca/pipe y limpiar espacios
+                        qs = [q.strip() for q in q_raw.split('|') if q.strip()]
+                        if not qs: return ""
+                        
+                        # Armar el nuevo texto formateado
+                        res = "\n\n**Preguntas de seguimiento sugeridas:**\n"
+                        for q in qs: 
+                            res += f"- {q}\n"
+                        return res
+                    
+                    # Ejecutar el reemplazo (DOTALL permite que lea aunque haya saltos de línea)
+                    content = re.sub(r"<pida_questions>(.*?)</pida_questions>", replacer, content, flags=re.DOTALL)
+            # 👆 FIN DEL FILTRO 👆
+
+            chat_lines.append(f"**{role_str}:**\n{content.strip()}")
             
         chat_text = "\n\n".join(chat_lines)
         
-        # Limitar tamaño por seguridad (Ej. max 50,000 caracteres)
+        # Limitar tamaño por seguridad
         if len(chat_text) > 50000:
             chat_text = chat_text[:50000] + "\n\n[Texto truncado por límite de seguridad]"
 
+        # Generar el archivo
         if file_format.lower() == "docx":
-            content, mime, fname = await asyncio.to_thread(create_chat_docx_sync, chat_text, title)
+            content_bytes, mime, fname = await asyncio.to_thread(create_chat_docx_sync, chat_text, title)
         else:
-            content, mime, fname = await asyncio.to_thread(create_chat_pdf_sync, chat_text, title)
+            content_bytes, mime, fname = await asyncio.to_thread(create_chat_pdf_sync, chat_text, title)
             
-        return Response(content=content, media_type=mime, headers={"Content-Disposition": f"attachment; filename={fname}"})
+        return Response(content=content_bytes, media_type=mime, headers={"Content-Disposition": f"attachment; filename={fname}"})
         
     except HTTPException as he:
         raise he
