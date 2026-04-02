@@ -98,22 +98,54 @@ def sanitize_text_for_pdf(text: str) -> str:
     return text.encode('latin1', 'replace').decode('latin-1')
 
 def write_markdown_to_pdf(pdf, text):
+    import re
     pdf.set_font("Arial", "", 11)
+    
+    # Convertir <br> de las tablas en saltos de línea reales
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    
     for line in text.split('\n'):
         line = line.strip()
         if not line:
             pdf.ln(5)
             continue
 
-        # 1. Ignorar la fila de guiones separadores de las tablas Markdown (|---|---|)
-        if re.match(r'^\|?[\s\-:]+\|[\s\-:|]+$', line):
-            continue
-
-        # 2. Convertir las filas de datos de la tabla en texto legible
+        # 👇 NUEVO: DIBUJANTE DE TABLAS NATIVO PARA PDF 👇
         if line.startswith('|') and line.endswith('|'):
-            line = line.strip('|').replace(' | ', ' - ').replace('|', ' - ')
+            # Ignorar la fila separadora de Markdown (|---|---|)
+            if re.match(r'^\|?[\s\-:]+\|[\s\-:|]+$', line):
+                continue
+            
+            cols = [c.strip() for c in line.strip('|').split('|')]
+            if not cols: 
+                continue
+            
+            # Calcular ancho equitativo para las columnas
+            col_width = pdf.epw / len(cols)
+            x_start = pdf.get_x()
+            y_start = pdf.get_y()
+            max_y = y_start
+            
+            for i, col in enumerate(cols):
+                col_clean = col.replace('**', '') # Limpiamos los asteriscos
+                pdf.set_xy(x_start + (i * col_width), y_start)
+                
+                # Si el texto original tenía negritas, ponemos la celda en negrita
+                pdf.set_font("Arial", "B" if "**" in col else "", 10)
+                
+                # multi_cell permite que el texto largo salte de línea dentro de la celda
+                pdf.multi_cell(col_width, 6, col_clean, border=1)
+                
+                if pdf.get_y() > max_y:
+                    max_y = pdf.get_y()
+            
+            # Mover el cursor debajo de la celda más alta para la siguiente fila
+            pdf.set_y(max_y)
+            pdf.set_font("Arial", "", 11) # Restaurar fuente normal
+            continue
+        # 👆 FIN DEL DIBUJANTE DE TABLAS 👆
 
-        # 3. Títulos H2
+        # Títulos H2
         if line.startswith('## '):
             pdf.ln(3)
             pdf.set_font("Arial", "B", 13)
@@ -123,7 +155,7 @@ def write_markdown_to_pdf(pdf, text):
             pdf.set_font("Arial", "", 11)
             continue
             
-        # 4. Títulos H3
+        # Títulos H3
         if line.startswith('### '):
             pdf.ln(2)
             pdf.set_font("Arial", "B", 12)
@@ -133,20 +165,20 @@ def write_markdown_to_pdf(pdf, text):
             pdf.set_font("Arial", "", 11)
             continue
 
-        # 5. Listas y viñetas
+        # Listas y viñetas
         if line.startswith('* ') or line.startswith('- '):
             pdf.set_x(15)
             line = "- " + line[2:]
         else:
             pdf.set_x(10)
 
-        # 6. Procesar negritas dinámicas en CUALQUIER parte del texto
+        # Negritas dinámicas
         parts = re.split(r'(\*\*.*?\*\*)', line)
         for part in parts:
             if part.startswith('**') and part.endswith('**'):
                 pdf.set_font("Arial", "B", 11)
-                pdf.write(6, part.strip('*'))  # Escribe la palabra en negrita
-                pdf.set_font("Arial", "", 11)  # Regresa a fuente normal
+                pdf.write(6, part.strip('*'))
+                pdf.set_font("Arial", "", 11)
             else:
                 pdf.write(6, part)
         pdf.ln(6)
@@ -175,46 +207,66 @@ def create_chat_docx_sync(chat_text: str, title: str) -> tuple:
 
     doc = Document()
     
-    # Título Principal
     heading = doc.add_heading(title, 0)
     heading.style.font.color.rgb = RGBColor(29, 53, 87)
 
-    # Limpieza de alucinaciones matemáticas
-    text = chat_text.replace('$', '').replace('^{a}', 'a.').replace('^{o}', 'o.')
+    text = re.sub(r'<br\s*/?>', '\n', chat_text, flags=re.IGNORECASE)
+    text = text.replace('$', '').replace('^{a}', 'a.').replace('^{o}', 'o.')
     
+    # Variables para rastrear si estamos construyendo una tabla
+    in_table = False
+    current_table = None
+
     for line in text.split('\n'):
         line = line.strip()
         if not line:
+            in_table = False # Si hay un salto de línea en blanco, la tabla terminó
             continue
             
-        # Ignorar separadores de tabla Markdown
-        if re.match(r'^\|?[\s\-:]+\|[\s\-:|]+$', line):
-            continue
-            
-        # Convertir celdas de tabla en texto legible
+        # 👇 NUEVO: DIBUJANTE DE TABLAS NATIVO PARA WORD 👇
         if line.startswith('|') and line.endswith('|'):
-            line = line.strip('|').replace(' | ', ' - ').replace('|', ' - ')
+            if re.match(r'^\|?[\s\-:]+\|[\s\-:|]+$', line):
+                continue # Ignorar separador
+                
+            cols = [c.strip() for c in line.strip('|').split('|')]
+            
+            # Si es la primera fila de la tabla, la creamos
+            if not in_table:
+                current_table = doc.add_table(rows=1, cols=len(cols))
+                current_table.style = 'Table Grid' # Estilo nativo de Word con bordes
+                hdr_cells = current_table.rows[0].cells
+                for i, col in enumerate(cols):
+                    if i < len(hdr_cells):
+                        hdr_cells[i].text = col.replace('**', '')
+                in_table = True
+            # Si ya estamos en una tabla, agregamos una fila nueva
+            else:
+                if current_table:
+                    row_cells = current_table.add_row().cells
+                    for i, col in enumerate(cols):
+                        if i < len(row_cells):
+                            row_cells[i].text = col.replace('**', '')
+            continue
+        else:
+            in_table = False # Si la línea no tiene '|', cerramos la tabla
+        # 👆 FIN DEL DIBUJANTE DE TABLAS 👆
 
-        # Títulos H2
         if line.startswith('## '):
             h = doc.add_heading(line.replace('## ', ''), level=2)
             h.style.font.color.rgb = RGBColor(29, 53, 87)
             continue
         
-        # Títulos H3
         if line.startswith('### '):
             h = doc.add_heading(line.replace('### ', ''), level=3)
             h.style.font.color.rgb = RGBColor(40, 70, 100)
             continue
         
-        # Listas y viñetas
         if line.startswith('* ') or line.startswith('- '):
             p = doc.add_paragraph(style='List Bullet')
             line = line[2:]
         else:
             p = doc.add_paragraph()
 
-        # Procesar negritas dinámicas para que se vean bien en Word
         parts = re.split(r'(\*\*.*?\*\*)', line)
         for part in parts:
             if part.startswith('**') and part.endswith('**'):
@@ -223,12 +275,10 @@ def create_chat_docx_sync(chat_text: str, title: str) -> tuple:
             else:
                 p.add_run(part)
 
-    # Guardar documento
     doc_io = io.BytesIO()
     doc.save(doc_io)
     doc_io.seek(0)
     
-    # El nombre ahora solo actúa de fallback si el navegador falla
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"Experto_PIDA_{timestamp}.docx"
     
