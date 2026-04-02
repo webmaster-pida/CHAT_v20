@@ -104,24 +104,30 @@ def write_markdown_to_pdf(pdf, text):
     # Convertir <br> de las tablas en saltos de línea reales
     text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
     
+    # 👇 FIX: Cálculo seguro del ancho de página para cualquier versión de FPDF
+    try:
+        effective_page_width = pdf.epw
+    except AttributeError:
+        effective_page_width = pdf.w - pdf.l_margin - pdf.r_margin
+    
     for line in text.split('\n'):
         line = line.strip()
         if not line:
             pdf.ln(5)
             continue
 
-        # 👇 NUEVO: DIBUJANTE DE TABLAS NATIVO PARA PDF 👇
+        # DIBUJANTE DE TABLAS NATIVO PARA PDF
         if line.startswith('|') and line.endswith('|'):
             # Ignorar la fila separadora de Markdown (|---|---|)
             if re.match(r'^\|?[\s\-:]+\|[\s\-:|]+$', line):
                 continue
             
             cols = [c.strip() for c in line.strip('|').split('|')]
-            if not cols: 
+            if not cols or len(cols) == 0: 
                 continue
             
-            # Calcular ancho equitativo para las columnas
-            col_width = pdf.epw / len(cols)
+            # Usamos el ancho seguro calculado arriba
+            col_width = effective_page_width / len(cols)
             x_start = pdf.get_x()
             y_start = pdf.get_y()
             max_y = y_start
@@ -143,7 +149,6 @@ def write_markdown_to_pdf(pdf, text):
             pdf.set_y(max_y)
             pdf.set_font("Arial", "", 11) # Restaurar fuente normal
             continue
-        # 👆 FIN DEL DIBUJANTE DE TABLAS 👆
 
         # Títulos H2
         if line.startswith('## '):
