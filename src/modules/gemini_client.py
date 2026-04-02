@@ -69,7 +69,6 @@ async def generate_streaming_response(
     BASE_DELAY = 2 
 
     full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
-    google_search_tool = Tool.from_dict({"google_search": {}})
 
     for attempt in range(MAX_RETRIES + 1):
         try:
@@ -79,8 +78,7 @@ async def generate_streaming_response(
                 full_prompt, 
                 stream=True, 
                 generation_config=generation_config,
-                safety_settings=safety_settings,
-                tools=[google_search_tool]
+                safety_settings=safety_settings
             )
 
             unique_footer_sources = {} 
