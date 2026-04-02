@@ -19,7 +19,9 @@ from fpdf import FPDF
 
 from src.config import settings, log
 from src.models.chat_models import ChatRequest, ChatMessage
-from src.modules import vertex_search_client, gemini_client, rag_client, firestore_client
+
+# 👇 CAMBIO 1: Eliminamos vertex_search_client e importamos perplexity_client
+from src.modules import perplexity_client, gemini_client, rag_client, firestore_client
 from src.core.prompts import PIDA_SYSTEM_PROMPT
 from src.core.security import get_current_user
 
@@ -276,7 +278,7 @@ async def refund_chat_credit(user_id: str):
     except Exception as e:
         log.error(f"Error procesando reembolso de crédito para {user_id}: {e}")
 
-# --- GENERADOR STREAMING ---
+# --- GENERADOR STREAMING (EL ORQUESTADOR MÁGICO) ---
 async def stream_chat_response_generator(chat_request: ChatRequest, country_code: str | None, user: Dict[str, Any], convo_id: str):
     user_id = user['uid']
     try:
@@ -299,26 +301,39 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         history_from_db = await firestore_client.get_conversation_messages(user_id, convo_id)
         history_for_gemini = gemini_client.prepare_history_for_vertex(history_from_db[:-1])
         
-        yield create_sse_event({"event": "status", "message": "Consultando jurisprudencia..."})
+        # 👇 CAMBIO 2: Ejecución en paralelo de RAG y Perplexity
+        yield create_sse_event({"event": "status", "message": "Buscando en jurisprudencia e internet..."})
         
-        search_tasks = [
-            asyncio.to_thread(vertex_search_client.search, chat_request.prompt, num_results=3),
-            rag_client.search_internal_documents(chat_request.prompt)
-        ]
+        rag_task = rag_client.search_internal_documents(chat_request.prompt)
+        perp_task = perplexity_client.get_perplexity_research(chat_request.prompt)
         
-        combined_context = ""
-        for i, task in enumerate(asyncio.as_completed(search_tasks)):
-            result = await task
-            combined_context += result
-            yield create_sse_event({"event": "status", "message": f"Fuente {i+1} procesada..."})
+        # Esperamos a que AMBAS tareas terminen simultáneamente
+        rag_context, web_context = await asyncio.gather(rag_task, perp_task)
         
-        # --- AQUÍ ES DONDE OCURRE LA MAGIA DE LA LISTA BLANCA ---
+        yield create_sse_event({"event": "status", "message": "Sintetizando información..."})
+        
+        # Opcional: Mantenemos la lógica de la lista blanca extrayendo los links devueltos
+        combined_context = f"{rag_context}\n{web_context}"
         trusted_urls_list = re.findall(r'\((https?://[^\s\)]+)\)', combined_context)
         trusted_urls_set = set(trusted_urls_list)
         
-        yield create_sse_event({"event": "status", "message": "Generando respuesta..."})
+        yield create_sse_event({"event": "status", "message": "Generando respuesta final..."})
         
-        final_prompt = f"Contexto geográfico: {country_code}\n{combined_context}\n\n---\n\nPregunta del usuario: {chat_request.prompt}"
+        # 👇 CAMBIO 3: El "Super Prompt" que une ambos mundos
+        final_prompt = f"""Contexto geográfico: {country_code}
+
+Toma en cuenta las siguientes dos fuentes de información para redactar tu respuesta final. Dale prioridad a la jurisprudencia interna, y complementa con la investigación web. Mantén el formato de citas.
+
+[CONTEXTO INTERNO DE JURISPRUDENCIA (RAG)]:
+{rag_context}
+
+[INVESTIGACIÓN WEB RECIENTE (Perplexity)]:
+{web_context}
+
+---
+
+Pregunta del usuario: {chat_request.prompt}
+"""
         
         full_response_text = ""
         
