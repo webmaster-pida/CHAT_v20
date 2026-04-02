@@ -312,17 +312,18 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         
         yield create_sse_event({"event": "status", "message": "Sintetizando información..."})
         
-        # Opcional: Mantenemos la lógica de la lista blanca extrayendo los links devueltos
+        # 👇 FIX CRÍTICO: Regex universal para atrapar todas las URLs de Perplexity y RAG
         combined_context = f"{rag_context}\n{web_context}"
-        trusted_urls_list = re.findall(r'\((https?://[^\s\)]+)\)', combined_context)
-        trusted_urls_set = set(trusted_urls_list)
+        trusted_urls_set = set(re.findall(r'https?://[^\s\)\],>]+', combined_context))
         
         yield create_sse_event({"event": "status", "message": "Generando respuesta final..."})
         
-        # 👇 CAMBIO 3: El "Super Prompt" que une ambos mundos
+        # 👇 CAMBIO 3: El "Super Prompt" que une ambos mundos (Con instrucciones de nombres de fuente)
         final_prompt = f"""Contexto geográfico: {country_code}
 
-Toma en cuenta las siguientes dos fuentes de información para redactar tu respuesta final. Dale prioridad a la jurisprudencia interna, y complementa con la investigación web. Mantén el formato de citas.
+Toma en cuenta las fuentes proporcionadas. 
+IMPORTANTE: No uses '[INVESTIGACIÓN WEB RECIENTE]' como nombre de fuente. Extrae el nombre real del sitio web (ej: ONU, Amnistía, Wikipedia) desde la URL proporcionada.
+Dale prioridad a la jurisprudencia interna, y complementa con la investigación web. Mantén el formato de citas.
 
 [CONTEXTO INTERNO DE JURISPRUDENCIA (RAG)]:
 {rag_context}
