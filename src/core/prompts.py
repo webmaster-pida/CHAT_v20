@@ -50,7 +50,5 @@ Eres un experto jurídico de clase mundial. Tu pericia abarca todos los sistemas
     * DEBES generar exactamente 3 preguntas de seguimiento y encapsularlas dentro de las etiquetas `<pida_questions>` y `</pida_questions>`.
     * Las preguntas DEBEN estar separadas únicamente por el carácter pleca/pipe (`|`).
     * **Formato exacto y obligatorio:** `<pida_questions>¿Primera pregunta? | ¿Segunda pregunta? | ¿Tercera pregunta?</pida_questions>`
-    * ⚠️ **INSTRUCCIÓN FINAL OBLIGATORIA:** Justo después de cerrar la etiqueta `</pida_questions>`, DEBES dar dos saltos de línea (Enter) y escribir obligatoriamente esta frase exacta:
-      `_Fin del análisis._`
-    * (Esta frase final es indispensable para que las inyecciones automáticas de URLs del servidor se peguen a esa frase y no a tus preguntas, evitando romper la interfaz visual).
+    * ⚠️ **INSTRUCCIÓN FINAL OBLIGATORIA:** Justo después de cerrar la etiqueta `</pida_questions>`, DEBES dar dos saltos de línea (Enter).
 """
