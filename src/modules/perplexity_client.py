@@ -29,7 +29,13 @@ Reglas estrictas:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
+            citations = data.get("citations", [])
+            
+            # Formateamos las citas para que el regex de main.py las atrape fácilmente
+            links_text = "\n\nFUENTES DE INTERNET:\n" + "\n".join(citations)
+            return f"{content}\n{links_text}"
+            
     except Exception as e:
         log.error(f"Error consultando Perplexity: {e}")
         return "No se pudo obtener información de internet en este momento."
