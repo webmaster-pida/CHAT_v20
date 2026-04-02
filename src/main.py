@@ -115,7 +115,7 @@ def write_markdown_to_pdf(pdf, text):
             pdf.ln(5)
             continue
 
-        # DIBUJANTE DE TABLAS NATIVO PARA PDF
+        # 👇 DIBUJANTE DE TABLAS PERFECTAS (DOBLE PASADA) 👇
         if line.startswith('|') and line.endswith('|'):
             if re.match(r'^\|?[\s\-:]+\|[\s\-:|]+$', line):
                 continue
@@ -128,35 +128,43 @@ def write_markdown_to_pdf(pdf, text):
             x_start = pdf.get_x()
             y_start = pdf.get_y()
             
-            # Seguro anticaídas: Si estamos muy cerca del final de la página, saltamos a la siguiente
-            if y_start > pdf.h - pdf.b_margin - 20:
+            # Seguro anticaídas
+            if y_start > pdf.h - pdf.b_margin - 30:
                 pdf.add_page()
                 y_start = pdf.get_y()
                 
             max_y = y_start
             
+            # PASADA 1: Dibujar texto alineado a la izquierda (sin bordes) para medir la altura
             for i, col in enumerate(cols):
                 col_clean = col.replace('**', '')
-                # 👇 LA MAGIA: Convertimos el <br> a salto de línea AQUÍ, solo dentro de la celda
                 col_clean = re.sub(r'<br\s*/?>', '\n', col_clean, flags=re.IGNORECASE)
                 
                 pdf.set_xy(x_start + (i * col_width), y_start)
                 pdf.set_font("Arial", "B" if "**" in col else "", 10)
-                pdf.multi_cell(col_width, 6, col_clean, border=1)
+                
+                # El align='L' es el secreto para quitar los espacios gigantes entre palabras
+                pdf.multi_cell(col_width, 6, col_clean, border=0, align='L')
                 
                 if pdf.get_y() > max_y:
                     max_y = pdf.get_y()
             
+            # PASADA 2: Dibujar una cuadrícula perfecta basándose en la celda más alta
+            row_height = max_y - y_start
+            for i in range(len(cols)):
+                # Dibuja un rectángulo exacto, garantizando que todas las filas midan lo mismo
+                pdf.rect(x_start + (i * col_width), y_start, col_width, row_height)
+            
             pdf.set_y(max_y)
             pdf.set_font("Arial", "", 11)
             continue
+        # 👆 FIN DEL DIBUJANTE DE TABLAS 👆
 
         # Títulos H2
         if line.startswith('## '):
             pdf.ln(3)
             pdf.set_font("Arial", "B", 13)
             pdf.set_text_color(29, 53, 87)
-            # Limpiamos los <br> residuales si los hay en los títulos
             clean_line = re.sub(r'<br\s*/?>', ' ', line.replace('## ', ''), flags=re.IGNORECASE)
             pdf.multi_cell(0, 8, clean_line)
             pdf.set_text_color(0, 0, 0)
@@ -181,7 +189,7 @@ def write_markdown_to_pdf(pdf, text):
         else:
             pdf.set_x(10)
 
-        # Limpiamos los <br> residuales en el texto normal
+        # Limpiamos los <br> residuales
         line = re.sub(r'<br\s*/?>', '', line, flags=re.IGNORECASE)
 
         # Negritas dinámicas
