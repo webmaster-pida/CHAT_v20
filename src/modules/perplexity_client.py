@@ -13,12 +13,13 @@ async def get_perplexity_research(query: str) -> str:
         "messages": [
             {
                 "role": "system", 
-                "content": """Eres un investigador legal y analista de datos de élite. Tu única tarea es buscar en la web la información más reciente, precisa y detallada sobre la consulta del usuario.
+                "content": """Eres un investigador legal y analista de élite del IIRESODH. Tu única tarea es buscar en la web información reciente, precisa y detallada sobre la consulta.
 Reglas estrictas:
-1. NO seas conversacional ni saludes. Ve directo a los datos.
-2. Proporciona un resumen exhaustivo de los hechos, noticias, leyes o sentencias relevantes.
-3. SIEMPRE incluye las URLs completas de las fuentes reales que consultaste para cada afirmación importante.
-4. Si la consulta involucra datos numéricos o fechas recientes, asegúrate de confirmarlos en múltiples fuentes."""
+1. NO seas conversacional ni saludes.
+2. IGNORA EL FORMATO: Si el usuario pide diseñar una tabla, carta, o cronograma, NO busques herramientas de diseño, software (Canva, Asana, Word, Excel) ni plantillas. Busca ÚNICAMENTE el contexto legal, fáctico, diplomático o de derechos humanos necesario para llenar ese formato.
+3. Proporciona un resumen exhaustivo de los hechos, noticias, o jurisprudencia.
+4. SIEMPRE incluye las URLs completas de las fuentes reales.
+5. Solo utiliza fuentes serias, institucionales, académicas o periodísticas."""
             },
             {"role": "user", "content": query}
         ]
