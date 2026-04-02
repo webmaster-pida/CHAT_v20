@@ -20,6 +20,10 @@ log.setLevel(logging.INFO)
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
+    # --- NUEVO: API DE PERPLEXITY ---
+    PERPLEXITY_API_KEY: str = ""
+    PERPLEXITY_MODEL: str = "sonar-pro"
+
     # --- Variables de Google Cloud y API ---
     GOOGLE_CLOUD_PROJECT: str = "pida-ai-v20"
     GOOGLE_CLOUD_LOCATION: str = "us-central1"
