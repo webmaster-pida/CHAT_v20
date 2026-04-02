@@ -89,6 +89,9 @@ def generate_filename(title: str, extension: str) -> str:
 
 def sanitize_text_for_pdf(text: str) -> str:
     if not text: return ""
+    # Limpiar alucinaciones matemáticas de formato (ej. $(2^{a}$) -> 2a.)
+    text = text.replace('$', '').replace('^{a}', 'a.').replace('^{o}', 'o.')
+    
     replacements = { "•": "-", "—": "-", "–": "-", "“": '"', "”": '"', "‘": "'", "’": "'", "…": "...", "\u2013": "-", "\u2014": "-", "\u2022": "-", "\uF0B7": "-" }
     for char, replacement in replacements.items():
         text = text.replace(char, replacement)
@@ -101,37 +104,52 @@ def write_markdown_to_pdf(pdf, text):
         if not line:
             pdf.ln(5)
             continue
-        if line.startswith('**') and ':**' in line:
-            parts = line.split(':**', 1)
-            role = parts[0].replace('**', '')
-            content = parts[1].strip()
-            pdf.set_font("Arial", "B", 11)
-            pdf.set_text_color(29, 53, 87) 
-            pdf.write(6, f"{role}: ")
-            pdf.set_font("Arial", "", 11)
-            pdf.set_text_color(0, 0, 0)
-            sub_parts = re.split(r'(\*\*.*?\*\*)', content)
-            for sp in sub_parts:
-                if sp.startswith('**') and sp.endswith('**'):
-                    pdf.set_font("Arial", "B", 11)
-                    pdf.write(6, sp.strip('*'))
-                    pdf.set_font("Arial", "", 11)
-                else:
-                    pdf.write(6, sp)
-            pdf.ln(6)
-        elif line.startswith('## '):
+
+        # 1. Ignorar la fila de guiones separadores de las tablas Markdown (|---|---|)
+        if re.match(r'^\|?[\s\-:]+\|[\s\-:|]+$', line):
+            continue
+
+        # 2. Convertir las filas de datos de la tabla en texto legible
+        if line.startswith('|') and line.endswith('|'):
+            line = line.strip('|').replace(' | ', ' - ').replace('|', ' - ')
+
+        # 3. Títulos H2
+        if line.startswith('## '):
             pdf.ln(3)
             pdf.set_font("Arial", "B", 13)
             pdf.set_text_color(29, 53, 87)
             pdf.multi_cell(0, 8, line.replace('## ', ''))
             pdf.set_text_color(0, 0, 0)
             pdf.set_font("Arial", "", 11)
-        elif line.startswith('* ') or line.startswith('- '):
+            continue
+            
+        # 4. Títulos H3
+        if line.startswith('### '):
+            pdf.ln(2)
+            pdf.set_font("Arial", "B", 12)
+            pdf.set_text_color(40, 70, 100)
+            pdf.multi_cell(0, 7, line.replace('### ', ''))
+            pdf.set_text_color(0, 0, 0)
+            pdf.set_font("Arial", "", 11)
+            continue
+
+        # 5. Listas y viñetas
+        if line.startswith('* ') or line.startswith('- '):
             pdf.set_x(15)
-            pdf.write(6, "- " + line[2:])
-            pdf.ln(6)
+            line = "- " + line[2:]
         else:
-            pdf.multi_cell(0, 6, line)
+            pdf.set_x(10)
+
+        # 6. Procesar negritas dinámicas en CUALQUIER parte del texto
+        parts = re.split(r'(\*\*.*?\*\*)', line)
+        for part in parts:
+            if part.startswith('**') and part.endswith('**'):
+                pdf.set_font("Arial", "B", 11)
+                pdf.write(6, part.strip('*'))  # Escribe la palabra en negrita
+                pdf.set_font("Arial", "", 11)  # Regresa a fuente normal
+            else:
+                pdf.write(6, part)
+        pdf.ln(6)
 
 class PDF(FPDF):
     def header(self):
@@ -148,20 +166,73 @@ class PDF(FPDF):
         self.set_text_color(128, 128, 128)
         self.cell(0, 10, f"Pagina {self.page_no()}/{{nb}}", 0, 0, "C")
 
-def create_chat_docx_sync(chat_text: str, title: str) -> tuple[bytes, str, str]:
-    stream = io.BytesIO()
+def create_chat_docx_sync(chat_text: str, title: str) -> tuple:
+    from docx import Document
+    from docx.shared import RGBColor
+    import io
+    import re
+    from datetime import datetime
+
     doc = Document()
-    doc.add_heading("PIDA-AI: Historial de Chat", 0)
-    doc.add_paragraph(f"Tema: {title}")
-    doc.add_paragraph(f"Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-    doc.add_heading("Conversación", 1)
-    for line in chat_text.split('\n'):
-        if line.strip():
-            doc.add_paragraph(line)
-    doc.save(stream)
-    stream.seek(0)
-    fname = generate_filename(title, "docx")
-    return stream.read(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", fname
+    
+    # Título Principal
+    heading = doc.add_heading(title, 0)
+    heading.style.font.color.rgb = RGBColor(29, 53, 87)
+
+    # Limpieza de alucinaciones matemáticas
+    text = chat_text.replace('$', '').replace('^{a}', 'a.').replace('^{o}', 'o.')
+    
+    for line in text.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+            
+        # Ignorar separadores de tabla Markdown
+        if re.match(r'^\|?[\s\-:]+\|[\s\-:|]+$', line):
+            continue
+            
+        # Convertir celdas de tabla en texto legible
+        if line.startswith('|') and line.endswith('|'):
+            line = line.strip('|').replace(' | ', ' - ').replace('|', ' - ')
+
+        # Títulos H2
+        if line.startswith('## '):
+            h = doc.add_heading(line.replace('## ', ''), level=2)
+            h.style.font.color.rgb = RGBColor(29, 53, 87)
+            continue
+        
+        # Títulos H3
+        if line.startswith('### '):
+            h = doc.add_heading(line.replace('### ', ''), level=3)
+            h.style.font.color.rgb = RGBColor(40, 70, 100)
+            continue
+        
+        # Listas y viñetas
+        if line.startswith('* ') or line.startswith('- '):
+            p = doc.add_paragraph(style='List Bullet')
+            line = line[2:]
+        else:
+            p = doc.add_paragraph()
+
+        # Procesar negritas dinámicas para que se vean bien en Word
+        parts = re.split(r'(\*\*.*?\*\*)', line)
+        for part in parts:
+            if part.startswith('**') and part.endswith('**'):
+                run = p.add_run(part.strip('*'))
+                run.bold = True
+            else:
+                p.add_run(part)
+
+    # Guardar documento
+    doc_io = io.BytesIO()
+    doc.save(doc_io)
+    doc_io.seek(0)
+    
+    # El nombre ahora solo actúa de fallback si el navegador falla
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"Experto_PIDA_{timestamp}.docx"
+    
+    return doc_io.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", filename
 
 def create_chat_pdf_sync(chat_text: str, title: str) -> tuple[bytes, str, str]:
     safe_text = sanitize_text_for_pdf(chat_text)
