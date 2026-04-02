@@ -11,7 +11,15 @@ async def get_perplexity_research(query: str) -> str:
     payload = {
         "model": settings.PERPLEXITY_MODEL,
         "messages": [
-            {"role": "system", "content": "Eres un investigador legal. Busca en la web información actualizada sobre esta consulta y devuelve un resumen detallado con citas."},
+            {
+                "role": "system", 
+                "content": """Eres un investigador legal y analista de datos de élite. Tu única tarea es buscar en la web la información más reciente, precisa y detallada sobre la consulta del usuario.
+Reglas estrictas:
+1. NO seas conversacional ni saludes. Ve directo a los datos.
+2. Proporciona un resumen exhaustivo de los hechos, noticias, leyes o sentencias relevantes.
+3. SIEMPRE incluye las URLs completas de las fuentes reales que consultaste para cada afirmación importante.
+4. Si la consulta involucra datos numéricos o fechas recientes, asegúrate de confirmarlos en múltiples fuentes."""
+            },
             {"role": "user", "content": query}
         ]
     }
