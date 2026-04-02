@@ -436,14 +436,14 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         user_message = ChatMessage(role="user", content=chat_request.prompt)
         await firestore_client.add_message_to_conversation(user_id, convo_id, user_message)
         
-        yield create_sse_event({"event": "status", "message": "Iniciando... 🕵️"})
+        yield create_sse_event({"event": "status", "message": "Iniciando..."})
         await asyncio.sleep(0.1) 
         
         history_from_db = await firestore_client.get_conversation_messages(user_id, convo_id)
         history_for_gemini = gemini_client.prepare_history_for_vertex(history_from_db[:-1])
         
         # 👇 CAMBIO 2: Ejecución en paralelo de RAG y Perplexity
-        yield create_sse_event({"event": "status", "message": "Buscando en jurisprudencia e internet..."})
+        yield create_sse_event({"event": "status", "message": "Analizando jurisprudencia y fuentes públicas y biblioteca jurídica privada..."})
         
         rag_task = rag_client.search_internal_documents(chat_request.prompt)
         perp_task = perplexity_client.get_perplexity_research(chat_request.prompt)
@@ -451,13 +451,13 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         # Esperamos a que AMBAS tareas terminen simultáneamente
         rag_context, web_context = await asyncio.gather(rag_task, perp_task)
         
-        yield create_sse_event({"event": "status", "message": "Sintetizando información..."})
+        yield create_sse_event({"event": "status", "message": "Sintetizando y correlacionando fuentes..."})
         
         # 👇 FIX CRÍTICO: Regex universal para atrapar todas las URLs de Perplexity y RAG
         combined_context = f"{rag_context}\n{web_context}"
         trusted_urls_set = set(re.findall(r'https?://[^\s\)\],>]+', combined_context))
         
-        yield create_sse_event({"event": "status", "message": "Generando respuesta final..."})
+        yield create_sse_event({"event": "status", "message": "Formulando criterio jurídico final..."})
         
         # 👇 CAMBIO 3: El "Super Prompt" que une ambos mundos (Con instrucciones de nombres de fuente)
         final_prompt = f"""Contexto geográfico: {country_code}
