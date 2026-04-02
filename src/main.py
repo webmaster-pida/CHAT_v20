@@ -323,15 +323,18 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
 
 Toma en cuenta las fuentes proporcionadas. 
 IMPORTANTE: No uses '[INVESTIGACIÓN WEB RECIENTE]' como nombre de fuente. Extrae el nombre real del sitio web (ej: ONU, Amnistía, Wikipedia) desde la URL proporcionada.
-Dale prioridad a la jurisprudencia interna, y complementa con la investigación web. Mantén el formato de citas.
 
-[CONTEXTO INTERNO DE JURISPRUDENCIA (RAG)]:
+[CONTEXTO INTERNO DE JURISPRUDENCIA (RAG)]
+(⚠️ REGLA ESTRICTA: Tienes PROHIBIDO extraer o mostrar URLs de este bloque. Usa solo el conocimiento en texto plano).
 {rag_context}
 
-[INVESTIGACIÓN WEB RECIENTE (Perplexity)]:
+[INVESTIGACIÓN WEB RECIENTE (Perplexity)]
+(✅ REGLA ESTRICTA: Estas son las ÚNICAS URLs que tienes permitido usar en tu respuesta final).
 {web_context}
 
 ---
+INSTRUCCIÓN CRÍTICA DE ENLACES: 
+Bajo ninguna circunstancia inventes una URL. Si vas a poner un enlace azul, debe ser copiado EXACTAMENTE, carácter por carácter, del bloque de Perplexity. No le agregues puntos (.) ni comas (,) al final de la URL porque romperás el enlace y dará error 404.
 
 Pregunta del usuario: {chat_request.prompt}
 """
