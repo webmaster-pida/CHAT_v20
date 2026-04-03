@@ -8,6 +8,10 @@ async def get_perplexity_research(query: str) -> str:
         "Authorization": f"Bearer {settings.PERPLEXITY_API_KEY}",
         "Content-Type": "application/json"
     }
+    
+    # Inyectamos el requerimiento de investigación profunda en la consulta del usuario
+    enhanced_query = f"Investiga a fondo los antecedentes, jurisprudencia aplicable y hechos recientes sobre esta consulta: '{query}'. Proporciona un resumen detallado y extenso."
+
     payload = {
         "model": settings.PERPLEXITY_MODEL,
         "messages": [
@@ -21,7 +25,7 @@ Reglas estrictas:
 4. SIEMPRE incluye las URLs completas de las fuentes reales.
 5. Solo utiliza fuentes serias, institucionales, académicas o periodísticas."""
             },
-            {"role": "user", "content": query}
+            {"role": "user", "content": enhanced_query}
         ]
     }
     
