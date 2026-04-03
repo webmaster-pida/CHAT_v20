@@ -459,7 +459,7 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         
         yield create_sse_event({"event": "status", "message": "Formulando respuesta jurídica final..."})
         
-        # 👇 CAMBIO 3: El "Super Prompt" que une ambos mundos (Con instrucciones de nombres de fuente)
+        # 👇 CAMBIO 3: El "Super Prompt" con instrucciones coercitivas de enlaces
         final_prompt = f"""Contexto geográfico: {country_code}
 
 Toma en cuenta las fuentes proporcionadas. 
@@ -470,12 +470,14 @@ IMPORTANTE: No uses '[INVESTIGACIÓN WEB RECIENTE]' como nombre de fuente. Extra
 {rag_context}
 
 [INVESTIGACIÓN WEB RECIENTE (Perplexity)]
-(✅ REGLA ESTRICTA: Estas son las ÚNICAS URLs que tienes permitido usar en tu respuesta final).
+(✅ REGLA ESTRICTA: ESTÁS OBLIGADO a usar las URLs que aparecen en este bloque y convertirlas en hipervínculos Markdown dentro de tu texto).
 {web_context}
 
 ---
 INSTRUCCIÓN CRÍTICA DE ENLACES: 
-Bajo ninguna circunstancia inventes una URL. Si vas a poner un enlace azul, debe ser copiado EXACTAMENTE, carácter por carácter, del bloque de Perplexity. No le agregues puntos (.) ni comas (,) al final de la URL porque romperás el enlace y dará error 404.
+1. ¡NO USES NÚMEROS ENTRE CORCHETES COMO [1] O [2] PARA CITAR! El sistema los borrará automáticamente y perderemos la referencia.
+2. Tienes que leer la sección "FUENTES DE INTERNET" que te dio Perplexity y crear hipervínculos Markdown reales (ej: [Nombre de la Institución](URL_COMPLETA)).
+3. ES OBLIGATORIO que estos enlaces aparezcan incrustados dentro de los párrafos de tu Análisis Jurídico. No dejes el texto sin enlaces.
 
 Pregunta del usuario: {chat_request.prompt}
 """
