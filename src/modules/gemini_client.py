@@ -81,18 +81,11 @@ async def generate_streaming_response(
                 safety_settings=safety_settings
             )
 
-            unique_footer_sources = {} 
             text_buffer = "" 
 
             async for chunk in response_stream:
-                if chunk.candidates and chunk.candidates[0].grounding_metadata:
-                    metadata = chunk.candidates[0].grounding_metadata
-                    if hasattr(metadata, 'grounding_chunks'):
-                        for g_chunk in metadata.grounding_chunks:
-                            if g_chunk.web and g_chunk.web.uri:
-                                url = g_chunk.web.uri
-                                title = g_chunk.web.title or "Fuente Web"
-                                unique_footer_sources[url] = title
+                # Se eliminó la captura automática de grounding_metadata de Google
+                # para evitar enlaces de redirección que causan errores de CORS.
 
                 if chunk.text:
                     text_buffer += chunk.text
@@ -121,14 +114,10 @@ async def generate_streaming_response(
                     # 3. Limpieza mejorada de Artifacts de Citas: [1], (2), [3, 4], (5, 15, 16)
                     text_buffer = re.sub(r'\s?[\[\(]\s*\d+(?:\s*,\s*\d+)*\s*[\]\)]', '', text_buffer)
 
-                    # 4. REPARACIÓN DE MARKDOWN ROTO (Solución a tu imagen)
-                    # Reemplaza ">**" por "**" (cierre de negrita sucio)
+                    # 4. REPARACIÓN DE MARKDOWN ROTO
                     text_buffer = text_buffer.replace(">**", "**")
-                    # Reemplaza "<" por comilla si parece inicio de título
                     text_buffer = text_buffer.replace(" <", " \"")
-                    # Reemplaza ">" por comilla si parece fin de título
                     text_buffer = text_buffer.replace("> ", "\" ")
-                    # Elimina asteriscos huérfanos al final de línea
                     text_buffer = re.sub(r'\*\*\s*$', '', text_buffer, flags=re.MULTILINE)
 
                     # 5. AGGRESSIVE STRUCTURE CLEANING
@@ -150,10 +139,7 @@ async def generate_streaming_response(
                 text_buffer = re.sub(r'(?m)^\s*[\-\*•>]\s*$', '', text_buffer)
                 yield text_buffer
 
-            if unique_footer_sources:
-                yield "\n\n---\n**Fuentes Consultadas:**\n"
-                for url, title in unique_footer_sources.items():
-                    yield f"- [{title}]({url})\n"
+            # Se eliminó la generación del footer "Fuentes Consultadas" basado en metadatos de Google.
             
             return 
 
