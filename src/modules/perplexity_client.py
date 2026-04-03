@@ -30,9 +30,16 @@ Reglas estrictas:
     }
     
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        # AUMENTAMOS EL TIMEOUT A 60 SEGUNDOS. 
+        # Modelos de razonamiento profundo como 'sonar-pro' requieren más tiempo de procesamiento.
+        timeout_config = httpx.Timeout(60.0, connect=10.0)
+        
+        async with httpx.AsyncClient(timeout=timeout_config) as client:
             response = await client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
+            
+            # Lanzará una excepción si Perplexity devuelve un error (ej. 401 por API Key inválida)
+            response.raise_for_status() 
+            
             data = response.json()
             content = data["choices"][0]["message"]["content"]
             citations = data.get("citations", [])
@@ -41,6 +48,17 @@ Reglas estrictas:
             links_text = "\n\nFUENTES DE INTERNET:\n" + "\n".join(citations)
             return f"{content}\n{links_text}"
             
+    except httpx.HTTPStatusError as e:
+        # Esto capturará errores de la API (ej. problemas con la API Key, saldo agotado, o JSON mal formado)
+        log.error(f"Error HTTP de Perplexity ({e.response.status_code}): {e.response.text}", exc_info=True)
+        return "[INVESTIGACIÓN WEB FALLIDA: Error de autorización o de servidor en Perplexity]"
+        
+    except httpx.TimeoutException as e:
+        # Esto capturará si Perplexity tarda más de 60 segundos en responder
+        log.error(f"Timeout: La API de Perplexity tardó demasiado en responder a la consulta.", exc_info=True)
+        return "[INVESTIGACIÓN WEB FALLIDA: El servidor de búsqueda superó el tiempo de espera]"
+        
     except Exception as e:
-        log.error(f"Error consultando Perplexity: {e}")
-        return "No se pudo obtener información de internet en este momento."
+        # Cualquier otro error de red o de código
+        log.error(f"Error inesperado consultando Perplexity: {e}", exc_info=True)
+        return "[INVESTIGACIÓN WEB FALLIDA: Error de conexión desconocido]"
