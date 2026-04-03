@@ -84,62 +84,47 @@ async def generate_streaming_response(
             text_buffer = "" 
 
             async for chunk in response_stream:
-                # Se eliminó la captura automática de grounding_metadata de Google
-                # para evitar enlaces de redirección que causan errores de CORS.
-
                 if chunk.text:
                     text_buffer += chunk.text
                     
-                    # --- CLEANING LOGIC ---
-                    def is_url_trusted(url_to_check):
-                        clean_check = url_to_check.lower().strip().rstrip('/')
-                        for t_url in trusted_urls:
-                            clean_trust = t_url.lower().strip().rstrip('/')
-                            if clean_check == clean_trust or clean_check.startswith(clean_trust):
-                                return True
-                        return False
+                    # --- CLEANING LOGIC MEJORADO ---
+                    
+                    # 1. SE ELIMINÓ EL FILTRO ESTRICTO DE URLs QUE BORRABA LOS ENLACES.
+                    # Ahora confiamos en las instrucciones del System Prompt para evitar alucinaciones,
+                    # permitiendo que los enlaces Markdown pasen intactos hacia las tarjetas de la UI.
 
-                    # 1. Links Markdown
-                    md_pattern = r'\[([^\]]+)\]\s*\(\s*(https?://[^\s\)]+)\s*\)'
-                    def replace_markdown_link(match):
-                        return match.group(0) if is_url_trusted(match.group(2)) else match.group(1)
-                    text_buffer = re.sub(md_pattern, replace_markdown_link, text_buffer)
-
-                    # 2. URLs Sueltas
-                    raw_pattern = r'(?<!\()(https?://[^\s\)]+)' 
-                    def replace_raw_url(match):
-                        return match.group(0) if is_url_trusted(match.group(0)) else ""
-                    text_buffer = re.sub(raw_pattern, replace_raw_url, text_buffer)
-
-                    # 3. Limpieza mejorada de Artifacts de Citas: [1], (2), [3, 4], (5, 15, 16)
+                    # 2. Limpieza de Artifacts de Citas de Perplexity: [1], (2), [3, 4]
+                    # Eliminamos las citas numéricas residuales que ensucian el texto y confundían a Gemini
                     text_buffer = re.sub(r'\s?[\[\(]\s*\d+(?:\s*,\s*\d+)*\s*[\]\)]', '', text_buffer)
 
-                    # 4. REPARACIÓN DE MARKDOWN ROTO
+                    # 3. REPARACIÓN DE MARKDOWN ROTO
                     text_buffer = text_buffer.replace(">**", "**")
                     text_buffer = text_buffer.replace(" <", " \"")
                     text_buffer = text_buffer.replace("> ", "\" ")
                     text_buffer = re.sub(r'\*\*\s*$', '', text_buffer, flags=re.MULTILINE)
 
-                    # 5. AGGRESSIVE STRUCTURE CLEANING
+                    # 4. AGGRESSIVE STRUCTURE CLEANING
                     text_buffer = re.sub(r'(?m)^\s*[\-\*•>]\s*$', '', text_buffer)
                     text_buffer = re.sub(r'(?m)^\s*>\s*>\s*$', '', text_buffer)
                     text_buffer = re.sub(r'\n\s*\n\s*\n', '\n\n', text_buffer)
 
-                    # 6. BUFFERING
+                    # 5. BUFFERING INTELIGENTE PARA NO ROMPER ENLACES MARKDOWN
                     if len(text_buffer) < 400: 
-                        if any(text_buffer.strip().endswith(c) for c in ['[', '(', '*', '-', '>', '•']):
+                        if any(text_buffer.strip().endswith(c) for c in ['[', '(', '*', '-', '>', '•', 'http', 'https']):
                             continue
                         yield text_buffer
                         text_buffer = ""
                     else:
+                        # Protección anti-ruptura: No cortar el buffer si hay un corchete o paréntesis de enlace abierto
+                        if text_buffer.count('[') > text_buffer.count(']') or text_buffer.count('(') > text_buffer.count(')'):
+                            continue
+                        
                         yield text_buffer
                         text_buffer = ""
 
             if text_buffer:
                 text_buffer = re.sub(r'(?m)^\s*[\-\*•>]\s*$', '', text_buffer)
                 yield text_buffer
-
-            # Se eliminó la generación del footer "Fuentes Consultadas" basado en metadatos de Google.
             
             return 
 
