@@ -9,7 +9,7 @@ async def get_perplexity_research(query: str) -> str:
         "Content-Type": "application/json"
     }
     
-    # Inyectamos el requerimiento de investigación profunda en la consulta del usuario
+    # Inyectamos el requerimiento de investigación profunda
     enhanced_query = f"Investiga a fondo los antecedentes, jurisprudencia aplicable y hechos recientes sobre esta consulta: '{query}'. Proporciona un resumen detallado y extenso."
 
     payload = {
@@ -22,7 +22,7 @@ Reglas estrictas:
 1. NO seas conversacional ni saludes.
 2. IGNORA EL FORMATO: Si el usuario pide diseñar una tabla, carta, o cronograma, NO busques herramientas de diseño, software (Canva, Asana, Word, Excel) ni plantillas. Busca ÚNICAMENTE el contexto legal, fáctico, diplomático o de derechos humanos necesario para llenar ese formato.
 3. Proporciona un resumen exhaustivo de los hechos, noticias, o jurisprudencia.
-4. SIEMPRE incluye las URLs completas de las fuentes reales.
+4. SIEMPRE incluye hipervínculos Markdown con las URLs completas de las fuentes dentro de tu texto (ejemplo: [Nombre del Sitio](https://...)).
 5. Solo utiliza fuentes serias, institucionales, académicas o periodísticas."""
             },
             {"role": "user", "content": enhanced_query}
