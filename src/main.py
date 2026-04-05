@@ -422,27 +422,26 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
                 recent_history = chat_request.history[-4:] 
                 context_text = "\n".join([f"{msg.role.upper()}: {msg.content}" for msg in recent_history])
                 
-                # 👇 MEJORA DEFINITIVA: Reformulador con capacidad de Enrutamiento (Router)
+                # 👇 MEJORA DEFINITIVA: Reformulador con Enrutamiento (Router) Ultra-Estricto
                 reformulation_prompt = f"""
-Eres un asistente experto en analizar conversaciones. Tu tarea es evaluar si la última pregunta del usuario requiere buscar información externa (leyes, noticias, datos) o si es una pregunta puramente conversacional/sobre el historial.
+Instrucción: Actúa como un clasificador binario y reformulador estricto. Tu ÚNICA tarea es decidir si la pregunta necesita buscarse en internet.
 
-Contexto Geográfico Principal: {country_code or 'No especificado'}
-Contexto de la conversación reciente:
+Historial reciente:
 {context_text}
 
-Última pregunta del usuario:
-{chat_request.prompt}
+Pregunta actual: {chat_request.prompt}
 
-Reglas estrictas:
-1. Si la pregunta del usuario se puede responder ÚNICAMENTE leyendo el "Contexto de la conversación reciente" (ej. "¿De qué país estamos hablando?", "¿Me puedes resumir tu respuesta anterior?", "Gracias"), debes responder EXACTAMENTE con la palabra: SKIP_SEARCH
-2. Si la pregunta requiere buscar información nueva, reformúlala para que sea una consulta de búsqueda en internet completa e independiente. DEBES incluir el contexto geográfico (ej. El Salvador) en la reformulación.
-3. Devuelve ÚNICAMENTE la consulta reformulada o la palabra SKIP_SEARCH. Sin comillas ni explicaciones.
-"""
+Regla 1: Si la pregunta busca aclarar algo del historial ("¿De qué país hablamos?", "¿A qué te refieres?"), escribe ÚNICAMENTE la palabra: SKIP_SEARCH
+Regla 2: Si la pregunta pide leyes o datos nuevos, reformúlala incluyendo el país principal ({country_code or 'el del historial'}).
+
+Respuesta (sin comillas, sin explicaciones):"""
+                
                 flash_model = GenerativeModel("gemini-2.5-flash")
                 response = await flash_model.generate_content_async(reformulation_prompt)
                 
                 if response.text:
-                    search_query = response.text.strip()
+                    # Limpiamos saltos de línea, comillas o asteriscos de markdown que el LLM pueda meter
+                    search_query = response.text.strip().replace('"', '').replace("'", "").replace('*', '')
                     log.info(f"Query original: '{chat_request.prompt}' | Query reformulada: '{search_query}'")
             except Exception as e:
                 log.warning(f"Error reformulando la query, usando la original. Detalle: {e}")
@@ -452,8 +451,8 @@ Reglas estrictas:
         rag_context = ""
         web_context = ""
 
-        # 👇 SOLO BUSCAMOS SI EL MODELO NO DIJO "SKIP_SEARCH"
-        if search_query != "SKIP_SEARCH":
+        # 👇 CONDICIÓN ROBUSTA: Validamos si contiene la palabra clave, ignorando basura alrededor
+        if "SKIP_SEARCH" not in search_query.upper():
             yield create_sse_event({"event": "status", "message": "Analizando fuentes y biblioteca privada..."})
             
             rag_task = rag_client.search_internal_documents(search_query)
