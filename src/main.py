@@ -432,15 +432,14 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         return f"data: {json.dumps(data)}\n\n"
 
     try:
-        # Guardar mensaje usuario
+        # Guardar mensaje usuario (en background para no bloquear ni causar condiciones de carrera)
         user_message = ChatMessage(role="user", content=chat_request.prompt)
-        await firestore_client.add_message_to_conversation(user_id, convo_id, user_message)
+        asyncio.create_task(firestore_client.add_message_to_conversation(user_id, convo_id, user_message))
         
         yield create_sse_event({"event": "status", "message": "Iniciando..."})
-        await asyncio.sleep(0.1) 
         
-        history_from_db = await firestore_client.get_conversation_messages(user_id, convo_id)
-        history_for_gemini = gemini_client.prepare_history_for_vertex(history_from_db[:-1])
+        # 2. MEJORA: Usar el historial que envió el cliente en la petición (chat_request.history)
+        history_for_gemini = gemini_client.prepare_history_for_vertex(chat_request.history)
         
         # 👇 CAMBIO 2: Ejecución en paralelo de RAG y Perplexity
         yield create_sse_event({"event": "status", "message": "Analizando fuentes y biblioteca privada..."})
