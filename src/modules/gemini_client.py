@@ -36,6 +36,7 @@ try:
         HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
     }
 
+    # Mantenemos este modelo global para verificar que la inicialización general funciona
     model = GenerativeModel(settings.GEMINI_MODEL)
     log.info(f"Cliente de Vertex AI inicializado y modelo '{settings.GEMINI_MODEL}' cargado.")
 
@@ -68,14 +69,21 @@ async def generate_streaming_response(
     MAX_RETRIES = 3
     BASE_DELAY = 2 
 
-    full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
+    # 👇 CORRECCIÓN: Instanciamos el modelo usando system_instruction nativo
+    # Esto evita contaminar el prompt del usuario y mantiene la "memoria" intacta.
+    model_with_system = GenerativeModel(
+        settings.GEMINI_MODEL,
+        system_instruction=[system_prompt]
+    )
 
     for attempt in range(MAX_RETRIES + 1):
         try:
-            chat = model.start_chat(history=history, response_validation=False)
+            # Usamos el modelo instanciado con el system prompt
+            chat = model_with_system.start_chat(history=history, response_validation=False)
             
+            # Enviamos ÚNICAMENTE el prompt del turno actual (ya trae Perplexity y RAG)
             response_stream = await chat.send_message_async(
-                full_prompt, 
+                prompt, 
                 stream=True, 
                 generation_config=generation_config,
                 safety_settings=safety_settings
