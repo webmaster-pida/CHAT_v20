@@ -408,21 +408,26 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         return f"data: {json.dumps(data)}\n\n"
 
     try:
+        # 👇 1. SOLUCIÓN A LA AMNESIA: Leemos el historial real de Firestore PRIMERO
+        history_from_db = await firestore_client.get_conversation_messages(user_id, convo_id)
+        
+        # 👇 2. SOLUCIÓN A LA CONDICIÓN DE CARRERA: Guardamos el mensaje actual en background
         user_message = ChatMessage(role="user", content=chat_request.prompt)
         asyncio.create_task(firestore_client.add_message_to_conversation(user_id, convo_id, user_message))
         
         yield create_sse_event({"event": "status", "message": "Iniciando..."})
         
-        history_for_gemini = gemini_client.prepare_history_for_vertex(chat_request.history)
+        # 👇 3. Preparamos el historial para Gemini (Usamos el de la BD)
+        history_for_gemini = gemini_client.prepare_history_for_vertex(history_from_db)
         
         search_query = chat_request.prompt
-        if chat_request.history:
+        if history_from_db: # Si hay historial en la BD, encendemos el Enrutador
             yield create_sse_event({"event": "status", "message": "Contextualizando la búsqueda..."})
             try:
-                recent_history = chat_request.history[-4:] 
+                recent_history = history_from_db[-4:] 
                 context_text = "\n".join([f"{msg.role.upper()}: {msg.content}" for msg in recent_history])
                 
-                # 👇 MEJORA DEFINITIVA: Reformulador con Enrutamiento (Router) Ultra-Estricto
+                # Reformulador con Enrutamiento (Router) Ultra-Estricto
                 reformulation_prompt = f"""
 Instrucción: Actúa como un clasificador binario y reformulador estricto. Tu ÚNICA tarea es decidir si la pregunta necesita buscarse en internet.
 
@@ -440,7 +445,6 @@ Respuesta (sin comillas, sin explicaciones):"""
                 response = await flash_model.generate_content_async(reformulation_prompt)
                 
                 if response.text:
-                    # Limpiamos saltos de línea, comillas o asteriscos de markdown que el LLM pueda meter
                     search_query = response.text.strip().replace('"', '').replace("'", "").replace('*', '')
                     log.info(f"Query original: '{chat_request.prompt}' | Query reformulada: '{search_query}'")
             except Exception as e:
@@ -451,7 +455,7 @@ Respuesta (sin comillas, sin explicaciones):"""
         rag_context = ""
         web_context = ""
 
-        # 👇 CONDICIÓN ROBUSTA: Validamos si contiene la palabra clave, ignorando basura alrededor
+        # 👇 CONDICIÓN ROBUSTA: Validamos ignorando basura alrededor
         if "SKIP_SEARCH" not in search_query.upper():
             yield create_sse_event({"event": "status", "message": "Analizando fuentes y biblioteca privada..."})
             
