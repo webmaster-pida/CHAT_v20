@@ -422,9 +422,9 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
                 recent_history = chat_request.history[-4:] 
                 context_text = "\n".join([f"{msg.role.upper()}: {msg.content}" for msg in recent_history])
                 
-                # 👇 MEJORA 1: Prompt de reformulación más agresivo con el país
+                # 👇 MEJORA DEFINITIVA: Reformulador con capacidad de Enrutamiento (Router)
                 reformulation_prompt = f"""
-Eres un asistente experto en búsquedas de información jurídica. Tu única tarea es reformular la última pregunta del usuario para que sea una consulta de búsqueda en internet completa, específica y totalmente independiente del historial.
+Eres un asistente experto en analizar conversaciones. Tu tarea es evaluar si la última pregunta del usuario requiere buscar información externa (leyes, noticias, datos) o si es una pregunta puramente conversacional/sobre el historial.
 
 Contexto Geográfico Principal: {country_code or 'No especificado'}
 Contexto de la conversación reciente:
@@ -434,9 +434,9 @@ Contexto de la conversación reciente:
 {chat_request.prompt}
 
 Reglas estrictas:
-1. DEBES incluir obligatoriamente el "Contexto Geográfico Principal" (ej. El Salvador) o el país mencionado en el historial dentro de tu reformulación para evitar que el buscador traiga leyes de otros países (como España).
-2. Si la pregunta hace referencia a un tema anterior (ej. "porqué lo considera un avance"), extrae el tema jurídico (ej. reducción de mayoría de edad o matrimonio infantil) y plásmalo claramente.
-3. Devuelve ÚNICAMENTE la consulta reformulada. No uses comillas, ni introducciones, ni expliques tu razonamiento.
+1. Si la pregunta del usuario se puede responder ÚNICAMENTE leyendo el "Contexto de la conversación reciente" (ej. "¿De qué país estamos hablando?", "¿Me puedes resumir tu respuesta anterior?", "Gracias"), debes responder EXACTAMENTE con la palabra: SKIP_SEARCH
+2. Si la pregunta requiere buscar información nueva, reformúlala para que sea una consulta de búsqueda en internet completa e independiente. DEBES incluir el contexto geográfico (ej. El Salvador) en la reformulación.
+3. Devuelve ÚNICAMENTE la consulta reformulada o la palabra SKIP_SEARCH. Sin comillas ni explicaciones.
 """
                 flash_model = GenerativeModel("gemini-2.5-flash")
                 response = await flash_model.generate_content_async(reformulation_prompt)
@@ -448,14 +448,20 @@ Reglas estrictas:
                 log.warning(f"Error reformulando la query, usando la original. Detalle: {e}")
                 search_query = chat_request.prompt
 
-        yield create_sse_event({"event": "status", "message": "Analizando fuentes y biblioteca privada..."})
-        
-        rag_task = rag_client.search_internal_documents(search_query)
-        perp_task = perplexity_client.get_perplexity_research(search_query)
-        
-        rag_context, web_context = await asyncio.gather(rag_task, perp_task)
-        
-        yield create_sse_event({"event": "status", "message": "Sintetizando y correlacionando fuentes..."})
+        # Inicializamos los contextos vacíos por defecto
+        rag_context = ""
+        web_context = ""
+
+        # 👇 SOLO BUSCAMOS SI EL MODELO NO DIJO "SKIP_SEARCH"
+        if search_query != "SKIP_SEARCH":
+            yield create_sse_event({"event": "status", "message": "Analizando fuentes y biblioteca privada..."})
+            
+            rag_task = rag_client.search_internal_documents(search_query)
+            perp_task = perplexity_client.get_perplexity_research(search_query)
+            
+            rag_context, web_context = await asyncio.gather(rag_task, perp_task)
+            
+            yield create_sse_event({"event": "status", "message": "Sintetizando y correlacionando fuentes..."})
         
         combined_context = f"{rag_context}\n{web_context}"
         trusted_urls_set = set(re.findall(r'https?://[^\s\)\],>]+', combined_context))
