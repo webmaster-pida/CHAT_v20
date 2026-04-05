@@ -25,7 +25,6 @@ from src.core.prompts import PIDA_SYSTEM_PROMPT
 from src.core.security import get_current_user
 
 from google.cloud import firestore
-# 👇 IMPORTACIÓN NECESARIA PARA LA REFORMULACIÓN
 from vertexai.generative_models import GenerativeModel 
 
 # MAPA DE TRADUCCIÓN: ID de Stripe -> Nombre del Plan interno para que no se equivoque
@@ -416,18 +415,18 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         
         history_for_gemini = gemini_client.prepare_history_for_vertex(chat_request.history)
         
-        # 👇 NUEVO: REFORMULADOR DE BÚSQUEDA CON GEMINI 2.5 FLASH 👇
         search_query = chat_request.prompt
         if chat_request.history:
             yield create_sse_event({"event": "status", "message": "Contextualizando la búsqueda..."})
             try:
-                # Tomamos los últimos 4 mensajes para darle contexto a la IA (para ahorrar tokens)
                 recent_history = chat_request.history[-4:] 
                 context_text = "\n".join([f"{msg.role.upper()}: {msg.content}" for msg in recent_history])
                 
+                # 👇 MEJORA 1: Prompt de reformulación más agresivo con el país
                 reformulation_prompt = f"""
-Eres un asistente experto en búsquedas de información. Tu única tarea es reformular la última pregunta del usuario para que sea una consulta de búsqueda en internet completa, específica y totalmente independiente del historial.
+Eres un asistente experto en búsquedas de información jurídica. Tu única tarea es reformular la última pregunta del usuario para que sea una consulta de búsqueda en internet completa, específica y totalmente independiente del historial.
 
+Contexto Geográfico Principal: {country_code or 'No especificado'}
 Contexto de la conversación reciente:
 {context_text}
 
@@ -435,11 +434,10 @@ Contexto de la conversación reciente:
 {chat_request.prompt}
 
 Reglas estrictas:
-1. Si la pregunta hace referencia a un país, tema o evento mencionado anteriormente (ej. "allí", "y antes de eso?", "¿por qué es un avance?"), DEBES incluir los nombres propios y el contexto geográfico explícito en tu reformulación.
-2. Si la pregunta ya es completamente independiente, déjala igual.
+1. DEBES incluir obligatoriamente el "Contexto Geográfico Principal" (ej. El Salvador) o el país mencionado en el historial dentro de tu reformulación para evitar que el buscador traiga leyes de otros países (como España).
+2. Si la pregunta hace referencia a un tema anterior (ej. "porqué lo considera un avance"), extrae el tema jurídico (ej. reducción de mayoría de edad o matrimonio infantil) y plásmalo claramente.
 3. Devuelve ÚNICAMENTE la consulta reformulada. No uses comillas, ni introducciones, ni expliques tu razonamiento.
 """
-                # Instanciamos el modelo rápido y barato
                 flash_model = GenerativeModel("gemini-2.5-flash")
                 response = await flash_model.generate_content_async(reformulation_prompt)
                 
@@ -449,11 +447,9 @@ Reglas estrictas:
             except Exception as e:
                 log.warning(f"Error reformulando la query, usando la original. Detalle: {e}")
                 search_query = chat_request.prompt
-        # 👆 FIN DEL REFORMULADOR 👆
 
         yield create_sse_event({"event": "status", "message": "Analizando fuentes y biblioteca privada..."})
         
-        # OJO: Pasamos 'search_query' (reformulado) a las herramientas de búsqueda
         rag_task = rag_client.search_internal_documents(search_query)
         perp_task = perplexity_client.get_perplexity_research(search_query)
         
@@ -466,8 +462,8 @@ Reglas estrictas:
         
         yield create_sse_event({"event": "status", "message": "Formulando respuesta jurídica final..."})
         
-        # OJO: A Gemini le pasamos el 'chat_request.prompt' original para que responda con naturalidad
-        final_prompt = f"""Contexto geográfico: {country_code}
+        # 👇 MEJORA 2: Válvula de escape en el Prompt Final para rechazar leyes extranjeras
+        final_prompt = f"""Contexto geográfico principal: {country_code or 'General'}
 
 Toma en cuenta las fuentes proporcionadas. 
 IMPORTANTE: No uses '[INVESTIGACIÓN WEB RECIENTE]' como nombre de fuente. Extrae el nombre real del sitio web (ej: ONU, Amnistía, Wikipedia) desde la URL proporcionada.
@@ -477,14 +473,14 @@ IMPORTANTE: No uses '[INVESTIGACIÓN WEB RECIENTE]' como nombre de fuente. Extra
 {rag_context}
 
 [INVESTIGACIÓN WEB RECIENTE (Perplexity)]
-(✅ REGLA ESTRICTA: ESTÁS OBLIGADO a usar las URLs que aparecen en este bloque y convertirlas en hipervínculos Markdown dentro de tu texto).
+(✅ REGLA ESTRICTA Y FILTRO GEOGRÁFICO: Debes usar las URLs de este bloque y convertirlas en hipervínculos Markdown. **EXCEPCIÓN CRÍTICA:** Si tu 'Contexto geográfico principal' es un país (ej. El Salvador) y la investigación web te trae leyes o instituciones de OTRO PAÍS distinto (ej. el BOE de España, Congreso de España), **TIENES ESTRICTAMENTE PROHIBIDO** usar y citar esas fuentes extranjeras. Limítate a usar fuentes del país correcto, doctrina general o de organismos internacionales).
 {web_context}
 
 ---
 INSTRUCCIÓN CRÍTICA DE ENLACES: 
 1. ¡NO USES NÚMEROS ENTRE CORCHETES COMO [1] O [2] PARA CITAR! El sistema los borrará automáticamente y perderemos la referencia.
 2. Tienes que leer la sección "FUENTES DE INTERNET" que te dio Perplexity y crear hipervínculos Markdown reales (ej: [Nombre de la Institución](URL_COMPLETA)).
-3. ES OBLIGATORIO que estos enlaces aparezcan incrustados dentro de los párrafos de tu Análisis Jurídico. No dejes el texto sin enlaces.
+3. ES OBLIGATORIO que los enlaces válidos aparezcan incrustados dentro de los párrafos. Si todas las fuentes web fueron descartadas por ser de otro país irrelevante, básate solo en tu conocimiento y el RAG, y no pongas enlaces web.
 
 Pregunta del usuario: {chat_request.prompt}
 """
