@@ -20,12 +20,13 @@ from fpdf import FPDF
 from src.config import settings, log
 from src.models.chat_models import ChatRequest, ChatMessage
 
-# 👇 CAMBIO 1: Eliminamos vertex_search_client e importamos perplexity_client
 from src.modules import perplexity_client, gemini_client, rag_client, firestore_client
 from src.core.prompts import PIDA_SYSTEM_PROMPT
 from src.core.security import get_current_user
 
 from google.cloud import firestore
+# 👇 IMPORTACIÓN NECESARIA PARA LA REFORMULACIÓN
+from vertexai.generative_models import GenerativeModel 
 
 # MAPA DE TRADUCCIÓN: ID de Stripe -> Nombre del Plan interno para que no se equivoque
 STRIPE_PRICE_MAP = {
@@ -89,7 +90,6 @@ def generate_filename(title: str, extension: str) -> str:
 
 def sanitize_text_for_pdf(text: str) -> str:
     if not text: return ""
-    # Limpiar alucinaciones matemáticas de formato (ej. $(2^{a}$) -> 2a.)
     text = text.replace('$', '').replace('^{a}', 'a.').replace('^{o}', 'o.')
     
     replacements = { "•": "-", "—": "-", "–": "-", "“": '"', "”": '"', "‘": "'", "’": "'", "…": "...", "\u2013": "-", "\u2014": "-", "\u2022": "-", "\uF0B7": "-" }
@@ -101,7 +101,6 @@ def write_markdown_to_pdf(pdf, text):
     import re
     pdf.set_font("Arial", "", 11)
     
-    # Cálculo seguro del ancho de página
     try:
         effective_page_width = pdf.epw
     except AttributeError:
@@ -115,7 +114,6 @@ def write_markdown_to_pdf(pdf, text):
             pdf.ln(5)
             continue
 
-        # 👇 DIBUJANTE DE TABLAS PERFECTAS (DOBLE PASADA) 👇
         if line.startswith('|') and line.endswith('|'):
             if re.match(r'^\|?[\s\-:]+\|[\s\-:|]+$', line):
                 continue
@@ -128,14 +126,12 @@ def write_markdown_to_pdf(pdf, text):
             x_start = pdf.get_x()
             y_start = pdf.get_y()
             
-            # Seguro anticaídas
             if y_start > pdf.h - pdf.b_margin - 30:
                 pdf.add_page()
                 y_start = pdf.get_y()
                 
             max_y = y_start
             
-            # PASADA 1: Dibujar texto alineado a la izquierda (sin bordes) para medir la altura
             for i, col in enumerate(cols):
                 col_clean = col.replace('**', '')
                 col_clean = re.sub(r'<br\s*/?>', '\n', col_clean, flags=re.IGNORECASE)
@@ -143,24 +139,19 @@ def write_markdown_to_pdf(pdf, text):
                 pdf.set_xy(x_start + (i * col_width), y_start)
                 pdf.set_font("Arial", "B" if "**" in col else "", 10)
                 
-                # El align='L' es el secreto para quitar los espacios gigantes entre palabras
                 pdf.multi_cell(col_width, 6, col_clean, border=0, align='L')
                 
                 if pdf.get_y() > max_y:
                     max_y = pdf.get_y()
             
-            # PASADA 2: Dibujar una cuadrícula perfecta basándose en la celda más alta
             row_height = max_y - y_start
             for i in range(len(cols)):
-                # Dibuja un rectángulo exacto, garantizando que todas las filas midan lo mismo
                 pdf.rect(x_start + (i * col_width), y_start, col_width, row_height)
             
             pdf.set_y(max_y)
             pdf.set_font("Arial", "", 11)
             continue
-        # 👆 FIN DEL DIBUJANTE DE TABLAS 👆
 
-        # Títulos H2
         if line.startswith('## '):
             pdf.ln(3)
             pdf.set_font("Arial", "B", 13)
@@ -171,7 +162,6 @@ def write_markdown_to_pdf(pdf, text):
             pdf.set_font("Arial", "", 11)
             continue
             
-        # Títulos H3
         if line.startswith('### '):
             pdf.ln(2)
             pdf.set_font("Arial", "B", 12)
@@ -182,17 +172,14 @@ def write_markdown_to_pdf(pdf, text):
             pdf.set_font("Arial", "", 11)
             continue
 
-        # Listas y viñetas
         if line.startswith('* ') or line.startswith('- '):
             pdf.set_x(15)
             line = "- " + line[2:]
         else:
             pdf.set_x(10)
 
-        # Limpiamos los <br> residuales
         line = re.sub(r'<br\s*/?>', '', line, flags=re.IGNORECASE)
 
-        # Negritas dinámicas
         parts = re.split(r'(\*\*.*?\*\*)', line)
         for part in parts:
             if part.startswith('**') and part.endswith('**'):
@@ -253,7 +240,6 @@ def create_chat_docx_sync(chat_text: str, title: str) -> tuple:
                 hdr_cells = current_table.rows[0].cells
                 for i, col in enumerate(cols):
                     if i < len(hdr_cells):
-                        # 👇 LA MAGIA: Limpiamos los <br> directo en la celda de Word
                         cell_text = re.sub(r'<br\s*/?>', '\n', col.replace('**', ''), flags=re.IGNORECASE)
                         hdr_cells[i].text = cell_text
                 in_table = True
@@ -268,7 +254,6 @@ def create_chat_docx_sync(chat_text: str, title: str) -> tuple:
         else:
             in_table = False
 
-        # Si no es tabla, limpiamos los <br> residuales
         line = re.sub(r'<br\s*/?>', '', line, flags=re.IGNORECASE)
 
         if line.startswith('## '):
@@ -346,7 +331,7 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
     try:
         user_doc = await db.collection("customers").document(user_id).get()
         if user_doc.exists and user_doc.to_dict().get("status") == "active":
-            return # Único punto de entrada permitido
+            return 
         
         raise HTTPException(status_code=403, detail="Suscripción inactiva o requiere tarjeta válida.")
     except HTTPException as e: raise e
@@ -359,15 +344,12 @@ def get_date_utc_minus_6() -> str:
     cst_now = utc_now - timedelta(hours=6)
     return cst_now.strftime('%Y-%m-%d')
 
-# --- LÓGICA DE CONTROL DE LÍMITES POR PREGUNTA (CORREGIDO: TRANSACCIÓN ATÓMICA) ---
+# --- LÓGICA DE CONTROL DE LÍMITES POR PREGUNTA ---
 async def consume_chat_credit(user_id: str, plan: str):
-    """
-    Verifica y consume un crédito de forma atómica para prevenir abusos de concurrencia.
-    """
     plan_key = plan.lower().replace('á', 'a').strip()
     limit = CHAT_LIMITS.get(plan_key, 0)
     
-    if limit == -1: return # VIP ilimitado
+    if limit == -1: return
 
     today = get_date_utc_minus_6()
     stats_ref = db.collection('users').document(user_id).collection('usage_stats').document(today)
@@ -375,8 +357,6 @@ async def consume_chat_credit(user_id: str, plan: str):
     @firestore.async_transactional
     async def check_and_increment(transaction, ref):
         snapshot = await ref.get(transaction=transaction)
-        
-        # SOLUCIÓN: Convertir a diccionario y pedir el dato de forma segura
         data = snapshot.to_dict() if snapshot.exists else {}
         current_count = data.get('chat_count', 0)
         
@@ -395,7 +375,6 @@ async def consume_chat_credit(user_id: str, plan: str):
     await check_and_increment(transaction, stats_ref)
 
 async def refund_chat_credit(user_id: str):
-    """Reembolsa el crédito asegurando que nunca baje de cero."""
     today = get_date_utc_minus_6()
     stats_ref = db.collection('users').document(user_id).collection('usage_stats').document(today)
     
@@ -403,10 +382,8 @@ async def refund_chat_credit(user_id: str):
     async def check_and_decrement(transaction, ref):
         snapshot = await ref.get(transaction=transaction)
         if snapshot.exists:
-            # SOLUCIÓN: Misma lógica segura
             data = snapshot.to_dict() or {}
             current_count = data.get('chat_count', 0)
-            
             if current_count > 0:
                 transaction.update(ref, {
                     'chat_count': current_count - 1,
@@ -432,33 +409,64 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         return f"data: {json.dumps(data)}\n\n"
 
     try:
-        # Guardar mensaje usuario (en background para no bloquear ni causar condiciones de carrera)
         user_message = ChatMessage(role="user", content=chat_request.prompt)
         asyncio.create_task(firestore_client.add_message_to_conversation(user_id, convo_id, user_message))
         
         yield create_sse_event({"event": "status", "message": "Iniciando..."})
         
-        # 2. MEJORA: Usar el historial que envió el cliente en la petición (chat_request.history)
         history_for_gemini = gemini_client.prepare_history_for_vertex(chat_request.history)
         
-        # 👇 CAMBIO 2: Ejecución en paralelo de RAG y Perplexity
+        # 👇 NUEVO: REFORMULADOR DE BÚSQUEDA CON GEMINI 2.5 FLASH 👇
+        search_query = chat_request.prompt
+        if chat_request.history:
+            yield create_sse_event({"event": "status", "message": "Contextualizando la búsqueda..."})
+            try:
+                # Tomamos los últimos 4 mensajes para darle contexto a la IA (para ahorrar tokens)
+                recent_history = chat_request.history[-4:] 
+                context_text = "\n".join([f"{msg.role.upper()}: {msg.content}" for msg in recent_history])
+                
+                reformulation_prompt = f"""
+Eres un asistente experto en búsquedas de información. Tu única tarea es reformular la última pregunta del usuario para que sea una consulta de búsqueda en internet completa, específica y totalmente independiente del historial.
+
+Contexto de la conversación reciente:
+{context_text}
+
+Última pregunta del usuario:
+{chat_request.prompt}
+
+Reglas estrictas:
+1. Si la pregunta hace referencia a un país, tema o evento mencionado anteriormente (ej. "allí", "y antes de eso?", "¿por qué es un avance?"), DEBES incluir los nombres propios y el contexto geográfico explícito en tu reformulación.
+2. Si la pregunta ya es completamente independiente, déjala igual.
+3. Devuelve ÚNICAMENTE la consulta reformulada. No uses comillas, ni introducciones, ni expliques tu razonamiento.
+"""
+                # Instanciamos el modelo rápido y barato
+                flash_model = GenerativeModel("gemini-2.5-flash")
+                response = await flash_model.generate_content_async(reformulation_prompt)
+                
+                if response.text:
+                    search_query = response.text.strip()
+                    log.info(f"Query original: '{chat_request.prompt}' | Query reformulada: '{search_query}'")
+            except Exception as e:
+                log.warning(f"Error reformulando la query, usando la original. Detalle: {e}")
+                search_query = chat_request.prompt
+        # 👆 FIN DEL REFORMULADOR 👆
+
         yield create_sse_event({"event": "status", "message": "Analizando fuentes y biblioteca privada..."})
         
-        rag_task = rag_client.search_internal_documents(chat_request.prompt)
-        perp_task = perplexity_client.get_perplexity_research(chat_request.prompt)
+        # OJO: Pasamos 'search_query' (reformulado) a las herramientas de búsqueda
+        rag_task = rag_client.search_internal_documents(search_query)
+        perp_task = perplexity_client.get_perplexity_research(search_query)
         
-        # Esperamos a que AMBAS tareas terminen simultáneamente
         rag_context, web_context = await asyncio.gather(rag_task, perp_task)
         
         yield create_sse_event({"event": "status", "message": "Sintetizando y correlacionando fuentes..."})
         
-        # 👇 FIX CRÍTICO: Regex universal para atrapar todas las URLs de Perplexity y RAG
         combined_context = f"{rag_context}\n{web_context}"
         trusted_urls_set = set(re.findall(r'https?://[^\s\)\],>]+', combined_context))
         
         yield create_sse_event({"event": "status", "message": "Formulando respuesta jurídica final..."})
         
-        # 👇 CAMBIO 3: El "Super Prompt" con instrucciones coercitivas de enlaces
+        # OJO: A Gemini le pasamos el 'chat_request.prompt' original para que responda con naturalidad
         final_prompt = f"""Contexto geográfico: {country_code}
 
 Toma en cuenta las fuentes proporcionadas. 
@@ -492,7 +500,6 @@ Pregunta del usuario: {chat_request.prompt}
             yield create_sse_event({'text': chunk})
             full_response_text += chunk
 
-        # Si se generó respuesta, guardar mensaje modelo
         if full_response_text:
             model_message = ChatMessage(role="model", content=full_response_text)
             await firestore_client.add_message_to_conversation(user_id, convo_id, model_message)
@@ -544,7 +551,6 @@ async def update_conversation_title_handler(convo_id: str, request: Request, cur
     await firestore_client.update_conversation_title(current_user['uid'], convo_id, new_title)
     return
 
-# --- ENDPOINT DEL CHAT MODIFICADO CON PROTECCIÓN ATÓMICA DE LÍMITES ---
 @app.post("/chat-stream/{convo_id}", tags=["Chat"])
 async def chat_stream_handler(
     convo_id: str, 
@@ -576,12 +582,11 @@ async def chat_stream_handler(
         except Exception as e:
             log.error(f"Error obteniendo plan usuario: {e}")
 
-    # 3. CONSUMO ATÓMICO DEL CRÉDITO (Previene abusos de concurrencia)
     await consume_chat_credit(user_id, user_plan)
 
     async def counted_stream_generator():
         has_error = False
-        tokens_sent = False # Nuevo flag
+        tokens_sent = False
         
         try:
             async for chunk in stream_chat_response_generator(
@@ -594,12 +599,10 @@ async def chat_stream_handler(
                     has_error = True
                 
                 if '"text":' in chunk and not has_error:
-                    tokens_sent = True # Si ya empezamos a enviar respuesta, ya costó dinero/cómputo
+                    tokens_sent = True
                     
                 yield chunk
         finally:
-            # SÓLO reembolsar si hubo un error del servidor ANTES de generar respuesta
-            # o si el usuario canceló la petición antes de que Gemini contestara.
             if has_error or not tokens_sent:
                 asyncio.create_task(refund_chat_credit(user_id))
 
@@ -621,51 +624,40 @@ async def download_chat(
     try:
         user_id = current_user['uid']
         
-        # 1. Recuperar datos
         messages = await firestore_client.get_conversation_messages(user_id, convo_id)
         if not messages:
             raise HTTPException(status_code=404, detail="Conversación no encontrada o vacía.")
             
         title = "Exportación de Chat PIDA"
         
-        # 2. Reconstruir el chat_text seguro
         chat_lines = []
         for msg in messages:
             role_str = "Usuario" if msg.role == "user" else "PIDA"
             content = msg.content
             
-            # 👇 FILTRO DE LIMPIEZA PARA EXPORTACIÓN 👇
             if msg.role == "model":
-                # A. Ocultar el marcador de finalización interno
                 content = content.replace("_Fin del análisis._", "")
                 
-                # B. Transformar la etiqueta HTML en una lista de viñetas limpia
                 if "<pida_questions>" in content and "</pida_questions>" in content:
                     def replacer(match):
                         q_raw = match.group(1)
-                        # Separar por la pleca/pipe y limpiar espacios
                         qs = [q.strip() for q in q_raw.split('|') if q.strip()]
                         if not qs: return ""
                         
-                        # Armar el nuevo texto formateado
                         res = "\n\n**Preguntas de seguimiento sugeridas:**\n"
                         for q in qs: 
                             res += f"- {q}\n"
                         return res
                     
-                    # Ejecutar el reemplazo (DOTALL permite que lea aunque haya saltos de línea)
                     content = re.sub(r"<pida_questions>(.*?)</pida_questions>", replacer, content, flags=re.DOTALL)
-            # 👆 FIN DEL FILTRO 👆
 
             chat_lines.append(f"**{role_str}:**\n{content.strip()}")
             
         chat_text = "\n\n".join(chat_lines)
         
-        # Limitar tamaño por seguridad
         if len(chat_text) > 50000:
             chat_text = chat_text[:50000] + "\n\n[Texto truncado por límite de seguridad]"
 
-        # Generar el archivo
         if file_format.lower() == "docx":
             content_bytes, mime, fname = await asyncio.to_thread(create_chat_docx_sync, chat_text, title)
         else:
@@ -786,7 +778,6 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
         customer_name = data.get("name", "") 
         user_promo_code = data.get("promotion_code", "").strip()
         
-        # 🛡️ RECIBIMOS LA TARJETA YA VALIDADA DESDE EL FRONTEND
         payment_method_id = data.get("paymentMethodId")
         if not payment_method_id:
             raise HTTPException(status_code=400, detail="Es necesario un método de pago válido.")
@@ -814,12 +805,10 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
         if trial_historico_usado:
             trial_days = 0 
             
-        # 🛡️ VALIDACIÓN EXTRA PARA EVITAR ABUSO DE TRIAL
         pm = stripe.PaymentMethod.retrieve(payment_method_id)
         pm_fingerprint = pm.card.fingerprint if pm.type == 'card' else None
 
         if trial_days > 0 and pm_fingerprint:
-            # Buscar si este correo ya se usó en un trial en Firestore
             existing_user_query = db.collection("customers").where("email", "==", user_email).where("trial_used", "==", True).limit(1)
             docs = await existing_user_query.get()
             if len(docs) > 0:
@@ -848,7 +837,6 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
                         allowed_list = [p.strip().lower() for p in allowed_plans_meta.split(",")]
                         if plan_key.lower() not in allowed_list:
                             raise HTTPException(status_code=400, detail=f"Cupón inválido para el plan {plan_key}.")
-                    # 🛡️ Validación nativa de Stripe agregada
                     elif coupon.get("applies_to"):
                         price_obj = stripe.Price.retrieve(price_id)
                         current_product_id = price_obj.product
@@ -862,25 +850,22 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             else:
                 raise HTTPException(status_code=400, detail=f"Código promocional inválido o expirado.")
 
-        # 🛡️ ADJUNTAMOS LA TARJETA AL CLIENTE ANTES DE CREAR LA SUSCRIPCIÓN
         stripe.PaymentMethod.attach(payment_method_id, customer=customer.id)
         stripe.Customer.modify(
             customer.id,
             invoice_settings={"default_payment_method": payment_method_id}
         )
 
-        # 🛡️ CREAMOS LA SUSCRIPCIÓN (Ya no se creará vacía, nacerá con la tarjeta pegada)
         subscription = stripe.Subscription.create(
             customer=customer.id,
             items=[{'price': price_id}],
             trial_period_days=trial_days if trial_days > 0 else None,
             promotion_code=promo_id, 
-            default_payment_method=payment_method_id, # Forzamos a que use la tarjeta
+            default_payment_method=payment_method_id, 
             expand=['latest_invoice.payment_intent', 'pending_setup_intent'], 
             metadata={"uid": uid, "plan_key": plan_key}
         )
 
-        # Si el banco del cliente exige verificación de 2 pasos (3D Secure)
         if subscription.status == 'incomplete' and subscription.latest_invoice and subscription.latest_invoice.payment_intent:
             return {"clientSecret": subscription.latest_invoice.payment_intent.client_secret, "requiresAction": True}
         
@@ -917,7 +902,7 @@ async def stripe_webhook(request: Request):
             plan = STRIPE_PRICE_MAP.get(p_id)
             if not plan:
                 log.error(f"⚠️ ALERTA DE SEGURIDAD: Webhook recibió un price_id desconocido: {p_id}")
-                return "none" # Bloquear acceso en lugar de dar plan basico
+                return "none"
             return plan
 
         if event['type'] in ['customer.subscription.created', 'customer.subscription.updated']:
@@ -930,7 +915,7 @@ async def stripe_webhook(request: Request):
             
             if uid:
                 is_active = (stripe_status in ['active', 'trialing']) and has_pm
-                is_trial = (stripe_status == 'trialing') # 🛡️ CORRECCIÓN: Indicar a Firestore que es un trial
+                is_trial = (stripe_status == 'trialing') 
                 
                 update_data = {
                     "status": "active" if is_active else "inactive",
