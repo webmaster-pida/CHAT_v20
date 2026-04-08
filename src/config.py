@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = "gemini-2.5-pro"
     
     # URL del RAG
-    RAG_API_URL: str = "https://rag-v30-git-465781488910.us-central1.run.app/query"
+    RAG_API_URL: str = "https://rag-v20-465781488910.us-central1.run.app/query"
 
     # --- Variables del Modelo Generativo ---
     MAX_OUTPUT_TOKENS: int = 16384
