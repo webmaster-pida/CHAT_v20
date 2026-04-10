@@ -4,7 +4,6 @@ from google.cloud import firestore
 from src.config import settings, log
 from src.models.chat_models import ChatMessage
 from typing import List, Dict, Any
-import datetime
 
 # Inicializa el cliente de Firestore de forma asíncrona
 db = firestore.AsyncClient(project=settings.GOOGLE_CLOUD_PROJECT)
