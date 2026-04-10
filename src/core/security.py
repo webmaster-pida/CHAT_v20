@@ -1,6 +1,5 @@
 # src/core/security.py
 
-import json
 import firebase_admin
 from firebase_admin import credentials, auth
 from fastapi import Request, Depends, HTTPException, status
