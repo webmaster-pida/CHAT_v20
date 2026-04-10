@@ -25,7 +25,10 @@ from src.core.prompts import PIDA_SYSTEM_PROMPT
 from src.core.security import get_current_user
 
 from google.cloud import firestore
-from vertexai.generative_models import GenerativeModel 
+from google import genai
+
+# Inicializar cliente global para utilidades dentro de main.py
+genai_client = genai.Client(vertexai=True, project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_LOCATION)
 
 # MAPA DE TRADUCCIÓN: ID de Stripe -> Nombre del Plan interno para que no se equivoque
 STRIPE_PRICE_MAP = {
@@ -418,7 +421,7 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         yield create_sse_event({"event": "status", "message": "Iniciando..."})
         
         # 👇 3. Preparamos el historial para Gemini (Usamos el de la BD)
-        history_for_gemini = gemini_client.prepare_history_for_vertex(history_from_db)
+        history_for_gemini = gemini_client.prepare_history_for_genai(history_from_db)
         
         search_query = chat_request.prompt
         if history_from_db: # Si hay historial en la BD, encendemos el Enrutador
@@ -441,8 +444,11 @@ Regla 2: Si la pregunta pide leyes o datos nuevos, reformúlala incluyendo el pa
 
 Respuesta (sin comillas, sin explicaciones):"""
                 
-                flash_model = GenerativeModel("gemini-2.5-flash")
-                response = await flash_model.generate_content_async(reformulation_prompt)
+                # Usamos el cliente asíncrono global que inicializamos arriba
+                response = await genai_client.aio.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=reformulation_prompt
+                )
                 
                 if response.text:
                     search_query = response.text.strip().replace('"', '').replace("'", "").replace('*', '')
