@@ -1,67 +1,56 @@
 # src/modules/gemini_client.py
 
-import vertexai
 import asyncio 
 import re 
 import random 
-import google.cloud.aiplatform as aiplatform
-from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable, Aborted, InternalServerError
-from vertexai.generative_models import (
-    GenerativeModel, 
-    Content, 
-    Part, 
-    GenerationConfig, 
-    Tool, 
-    HarmCategory, 
-    HarmBlockThreshold
-)
 from typing import List, AsyncGenerator, Set
+
+# Nuevas importaciones del SDK de GenAI
+from google import genai
+from google.genai import types
+from google.genai.errors import APIError
+
 from src.config import settings, log
 from src.models.chat_models import ChatMessage
 
 # --- INICIALIZACIÓN ---
 try:
-    vertexai.init(project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_LOCATION)
-
-    generation_config = GenerationConfig(
-        max_output_tokens=settings.MAX_OUTPUT_TOKENS,
-        temperature=settings.TEMPERATURE,
-        top_p=settings.TOP_P,
+    # El nuevo cliente maneja la inicialización internamente
+    client = genai.Client(
+        vertexai=True, 
+        project=settings.GOOGLE_CLOUD_PROJECT, 
+        location=settings.GOOGLE_CLOUD_LOCATION
     )
-
-    safety_settings = {
-        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-    }
-
-    # Mantenemos este modelo global para verificar que la inicialización general funciona
-    model = GenerativeModel(settings.GEMINI_MODEL)
-    log.info(f"Cliente de Vertex AI inicializado y modelo '{settings.GEMINI_MODEL}' cargado.")
+    log.info(f"Cliente de GenAI inicializado y apuntando al modelo '{settings.GEMINI_MODEL}'.")
 
 except Exception as e:
-    log.critical(f"No se pudo inicializar Vertex AI o cargar el modelo: {e}", exc_info=True)
-    model = None
+    log.critical(f"No se pudo inicializar GenAI Client: {e}", exc_info=True)
+    client = None
 
 # --- UTILS ---
 
-def prepare_history_for_vertex(history: List[ChatMessage]) -> List[Content]:
-    vertex_history = []
+def prepare_history_for_genai(history: List[ChatMessage]) -> List[types.Content]:
+    """Convierte el historial de BD al nuevo formato Content del SDK google-genai"""
+    genai_history = []
     for message in history:
         role = 'user' if message.role == 'user' else 'model'
-        vertex_history.append(Content(role=role, parts=[Part.from_text(message.content)]))
-    return vertex_history
+        genai_history.append(
+            types.Content(
+                role=role, 
+                parts=[types.Part.from_text(text=message.content)]
+            )
+        )
+    return genai_history
 
 async def generate_streaming_response(
     system_prompt: str, 
     prompt: str, 
-    history: List[Content],
+    history: List[types.Content],
     trusted_urls: Set[str] = set()
 ) -> AsyncGenerator[str, None]:
     
-    if not model:
-        log.error("El modelo Gemini no está disponible.")
+    if not client:
+        log.error("El modelo Gemini no está disponible (Cliente no inicializado).")
         yield "Error: El modelo de IA no está configurado correctamente."
         return
 
@@ -69,25 +58,31 @@ async def generate_streaming_response(
     MAX_RETRIES = 3
     BASE_DELAY = 2 
 
-    # 👇 CORRECCIÓN: Instanciamos el modelo usando system_instruction nativo
-    # Esto evita contaminar el prompt del usuario y mantiene la "memoria" intacta.
-    model_with_system = GenerativeModel(
-        settings.GEMINI_MODEL,
-        system_instruction=[system_prompt]
+    # 👇 NUEVA CONFIGURACIÓN: El System Prompt y la Seguridad ahora van agrupados aquí
+    generation_config = types.GenerateContentConfig(
+        max_output_tokens=settings.MAX_OUTPUT_TOKENS,
+        temperature=settings.TEMPERATURE,
+        top_p=settings.TOP_P,
+        system_instruction=system_prompt,
+        safety_settings=[
+            types.SafetySetting(category='HARM_CATEGORY_HATE_SPEECH', threshold='BLOCK_NONE'),
+            types.SafetySetting(category='HARM_CATEGORY_DANGEROUS_CONTENT', threshold='BLOCK_NONE'),
+            types.SafetySetting(category='HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold='BLOCK_NONE'),
+            types.SafetySetting(category='HARM_CATEGORY_HARASSMENT', threshold='BLOCK_NONE'),
+        ]
     )
 
     for attempt in range(MAX_RETRIES + 1):
         try:
-            # Usamos el modelo instanciado con el system prompt
-            chat = model_with_system.start_chat(history=history, response_validation=False)
+            # 👇 NUEVO CHAT ASÍNCRONO: Instanciamos el chat con la configuración y el historial previo
+            chat = client.aio.chats.create(
+                model=settings.GEMINI_MODEL,
+                config=generation_config,
+                history=history
+            )
             
             # Enviamos ÚNICAMENTE el prompt del turno actual (ya trae Perplexity y RAG)
-            response_stream = await chat.send_message_async(
-                prompt, 
-                stream=True, 
-                generation_config=generation_config,
-                safety_settings=safety_settings
-            )
+            response_stream = await chat.send_message_stream(prompt)
 
             text_buffer = "" 
 
@@ -95,35 +90,23 @@ async def generate_streaming_response(
                 if chunk.text:
                     text_buffer += chunk.text
                     
-                    # --- CLEANING LOGIC MEJORADO ---
-                    
-                    # 1. SE ELIMINÓ EL FILTRO ESTRICTO DE URLs QUE BORRABA LOS ENLACES.
-                    # Ahora confiamos en las instrucciones del System Prompt para evitar alucinaciones,
-                    # permitiendo que los enlaces Markdown pasen intactos hacia las tarjetas de la UI.
-
-                    # 2. Limpieza de Artifacts de Citas de Perplexity: [1], (2), [3, 4]
-                    # Eliminamos las citas numéricas residuales que ensucian el texto y confundían a Gemini
+                    # --- CLEANING LOGIC (Se mantiene tu lógica exacta anti-alucinaciones y formato) ---
                     text_buffer = re.sub(r'\s?[\[\(]\s*\d+(?:\s*,\s*\d+)*\s*[\]\)]', '', text_buffer)
-
-                    # 3. REPARACIÓN DE MARKDOWN ROTO
                     text_buffer = text_buffer.replace(">**", "**")
                     text_buffer = text_buffer.replace(" <", " \"")
                     text_buffer = text_buffer.replace("> ", "\" ")
                     text_buffer = re.sub(r'\*\*\s*$', '', text_buffer, flags=re.MULTILINE)
-
-                    # 4. AGGRESSIVE STRUCTURE CLEANING
                     text_buffer = re.sub(r'(?m)^\s*[\-\*•>]\s*$', '', text_buffer)
                     text_buffer = re.sub(r'(?m)^\s*>\s*>\s*$', '', text_buffer)
                     text_buffer = re.sub(r'\n\s*\n\s*\n', '\n\n', text_buffer)
 
-                    # 5. BUFFERING INTELIGENTE PARA NO ROMPER ENLACES MARKDOWN
+                    # BUFFERING INTELIGENTE PARA NO ROMPER ENLACES MARKDOWN
                     if len(text_buffer) < 400: 
                         if any(text_buffer.strip().endswith(c) for c in ['[', '(', '*', '-', '>', '•', 'http', 'https']):
                             continue
                         yield text_buffer
                         text_buffer = ""
                     else:
-                        # Protección anti-ruptura: No cortar el buffer si hay un corchete o paréntesis de enlace abierto
                         if text_buffer.count('[') > text_buffer.count(']') or text_buffer.count('(') > text_buffer.count(')'):
                             continue
                         
@@ -136,18 +119,24 @@ async def generate_streaming_response(
             
             return 
 
-        except (ResourceExhausted, ServiceUnavailable, Aborted, InternalServerError) as e:
-            log.warning(f"Vertex AI Error ({type(e).__name__}): {e} - Reintentando...")
-            if attempt < MAX_RETRIES:
-                wait_time = (BASE_DELAY * (2 ** attempt)) + random.uniform(0, 1)
-                await asyncio.sleep(wait_time)
-                continue
+        except APIError as e:
+            # Nuevo manejo de errores de cuotas o servidores caídos basados en códigos HTTP
+            if e.code in [429, 503, 500]:
+                log.warning(f"GenAI Error de cuota/servidor ({e.code}): {e.message} - Reintentando...")
+                if attempt < MAX_RETRIES:
+                    wait_time = (BASE_DELAY * (2 ** attempt)) + random.uniform(0, 1)
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    log.error("Agotados reintentos del cliente GenAI.")
+                    yield f"Error: El sistema de IA está saturado. Intente de nuevo más tarde."
+                    return
             else:
-                log.error("Agotados reintentos Vertex AI.")
-                yield f"Error: El sistema está saturado. Intente de nuevo más tarde."
+                log.error(f"Error crítico en GenAI: {e}", exc_info=True)
+                yield "Error inesperado en la generación (Código no recuperable)."
                 return
 
         except Exception as e:
-            log.error(f"Error Gemini: {e}", exc_info=True)
-            yield "Error inesperado en la generación."
+            log.error(f"Error inesperado genérico de Python: {e}", exc_info=True)
+            yield "Error interno al procesar la respuesta."
             return
