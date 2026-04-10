@@ -1,8 +1,6 @@
 # /src/main.py
 
-import os
 import stripe
-from firebase_admin import auth as firebase_auth
 import json
 import asyncio
 import io
