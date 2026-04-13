@@ -940,11 +940,29 @@ async def stripe_webhook(request: Request):
                 await db.collection("customers").document(uid).set(update_data, merge=True)
                 log.info(f"🛡️ Webhook: {uid} set to {'active' if is_active else 'inactive'} ({stripe_status})")
 
+        elif event['type'] == 'invoice.payment_succeeded':
+            # Confirmación de que el pago se realizó con éxito (renovaciones o pagos recuperados)
+            subscription_id = data_object.get('subscription')
+            if subscription_id:
+                try:
+                    subscription = stripe.Subscription.retrieve(subscription_id)
+                    uid = subscription.get('metadata', {}).get('uid')
+                    if uid:
+                        await db.collection("customers").document(uid).set({
+                            "status": "active",
+                            "updated_at": firestore.SERVER_TIMESTAMP
+                        }, merge=True)
+                        log.info(f"✅ Webhook: Pago exitoso para {uid}. Estado activado.")
+                except Exception as e:
+                    log.error(f"Error procesando invoice.payment_succeeded: {e}")
+
         elif event['type'] in ['customer.subscription.deleted', 'invoice.payment_failed']:
             uid = data_object.get('metadata', {}).get('uid')
             if not uid and data_object.get('subscription'):
-                sub = stripe.Subscription.retrieve(data_object['subscription'])
-                uid = sub.get('metadata', {}).get('uid')
+                try:
+                    sub = stripe.Subscription.retrieve(data_object['subscription'])
+                    uid = sub.get('metadata', {}).get('uid')
+                except Exception: pass
             
             if uid:
                 await db.collection("customers").document(uid).set({
