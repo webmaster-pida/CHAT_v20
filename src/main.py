@@ -906,14 +906,19 @@ async def stripe_webhook(request: Request):
         log.info(f"📩 Webhook recibido: {event['type']}")
 
         def resolve_plan(sub_obj):
-            items = sub_obj.get('items', {}).get('data', [])
-            p_id = items[0]['price']['id'] if items else None
-            plan = STRIPE_PRICE_MAP.get(p_id)
-            if not plan:
-                log.error(f"⚠️ ALERTA DE SEGURIDAD: Webhook recibió un price_id desconocido: {p_id}")
+            """Extracción robusta del plan desde un objeto Subscription de Stripe"""
+            try:
+                # Los items están en una ListObject, accedemos a la lista real vía .data
+                items = getattr(sub_obj.get('items', {}), 'data', [])
+                if not items: return "none"
+                # Obtenemos el ID del precio del primer item
+                p_id = items[0].get('price', {}).get('id')
+                return STRIPE_PRICE_MAP.get(p_id, "none")
+            except Exception as e:
+                log.error(f"Error en resolve_plan: {e}")
                 return "none"
-            return plan
 
+        # 1. CREACIÓN O ACTUALIZACIÓN (CAMBIO DE PLAN)
         if event['type'] in ['customer.subscription.created', 'customer.subscription.updated']:
             subscription = data_object
             uid = subscription.get('metadata', {}).get('uid')
@@ -940,6 +945,7 @@ async def stripe_webhook(request: Request):
                 await db.collection("customers").document(uid).set(update_data, merge=True)
                 log.info(f"🛡️ Webhook: {uid} set to {'active' if is_active else 'inactive'} ({stripe_status})")
 
+        # 2. PAGO EXITOSO (RENOVACIÓN O RECUPERACIÓN)
         elif event['type'] == 'invoice.payment_succeeded':
             # Confirmación de que el pago se realizó con éxito (renovaciones o pagos recuperados)
             subscription_id = data_object.get('subscription')
@@ -956,6 +962,7 @@ async def stripe_webhook(request: Request):
                 except Exception as e:
                     log.error(f"Error procesando invoice.payment_succeeded: {e}")
 
+        # 3. CANCELACIÓN O FALLO DE PAGO
         elif event['type'] in ['customer.subscription.deleted', 'invoice.payment_failed']:
             uid = data_object.get('metadata', {}).get('uid')
             if not uid and data_object.get('subscription'):
