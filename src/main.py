@@ -961,7 +961,7 @@ async def stripe_webhook(request: Request):
                 try:
                     # En este caso sí usamos Stripe SDK porque necesitamos consultar a su API
                     sub = stripe.Subscription.retrieve(subscription_id)
-                    metadata = sub.get('metadata') or {}
+                    metadata = getattr(sub, 'metadata', {})
                     uid = metadata.get('uid')
                     if uid:
                         await db.collection("customers").document(uid).set({
