@@ -586,8 +586,8 @@ async def chat_stream_handler(
                 data = cust_doc.to_dict()
                 if data.get('status') == 'active':
                     user_plan = data.get('plan', 'basico')
-                    if data.get('has_trial'):
-                        user_plan = 'basico'
+                    # if data.get('has_trial'):
+                        # user_plan = 'basico'
         except Exception as e:
             log.error(f"Error obteniendo plan usuario: {e}")
 
