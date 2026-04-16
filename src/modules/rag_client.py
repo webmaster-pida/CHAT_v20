@@ -45,9 +45,11 @@ async def search_internal_documents(query: str) -> str:
                 display_title = title or source_filename or "Documento Interno"
 
                 # PASO 3: Construir la línea de la cita según las reglas del prompt
-                citation_line = f"**Fuente:** **<{display_title}>**"
+                citation_line = f"Título: {display_title}"
                 if author and author.strip() and author != "Autor Desconocido":
-                    citation_line += f", {author}"
+                    citation_line += f" | Autor: {author}"
+                else:
+                    citation_line += f" | Autor: Institucional/No especificado"
                 
                 # PASO DE DEPURACIÓN
                 log.info(f"DEBUG RAG Doc {i}: title='{title}', author='{author}', citation_line='{citation_line}'")
