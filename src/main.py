@@ -769,35 +769,35 @@ async def validate_promo_code(request: Request):
         if not current_plan_name:
              raise HTTPException(status_code=400, detail="El plan seleccionado no es válido en el sistema.")
 
-        # 1. Recuperar el Código de Promoción
+        # 1. Recuperar el Código de Promoción (API Oficial: stripe.PromotionCode.list)
         try:
             promos = stripe.PromotionCode.list(code=promo_code, active=True, limit=1)
         except stripe.error.StripeError as e:
             log.error(f"StripeError al buscar promoción: {e.user_message}")
             raise HTTPException(status_code=400, detail="Error de conexión con Stripe al buscar el código.")
 
-        if not promos.data:
+        if not hasattr(promos, 'data') or not promos.data:
             raise HTTPException(status_code=404, detail="El código promocional no es válido o ha expirado.")
 
         promo_obj = promos.data[0]
         
-        # EXTRACCIÓN OFICIAL BASADA EN DICCIONARIO
-        # Evita el KeyError interno de _stripe_object.py
-        coupon_data = promo_obj.get("coupon")
-        
-        # Soporte para estructuras de versiones de API donde viene dentro de 'promotion'
-        if not coupon_data and promo_obj.get("promotion"):
-            coupon_data = promo_obj.get("promotion").get("coupon")
+        # ---------------------------------------------------------
+        # EXTRACCIÓN OFICIAL SEGÚN SDK v15+ (stripe/_promotion_code.py)
+        # El cupón se encuentra anidado dentro de la clase 'Promotion'
+        # ---------------------------------------------------------
+        promo_coupon = None
+        if hasattr(promo_obj, 'promotion') and promo_obj.promotion:
+            promo_coupon = promo_obj.promotion.coupon
+        elif hasattr(promo_obj, 'coupon'): # Fallback de retrocompatibilidad
+            promo_coupon = promo_obj.coupon
+            
+        if not promo_coupon:
+            raise HTTPException(status_code=404, detail="No se encontró un cupón asociado a esta promoción.")
 
-        if not coupon_data:
-            # Si falla, imprimirá el objeto exacto en GCP para auditar tu versión de API
-            log.error(f"El objeto de Stripe no tiene la estructura esperada: {promo_obj}")
-            raise HTTPException(status_code=404, detail="No se encontró un cupón asociado a este código.")
+        # Extraemos el ID oficial (puede ser un string o un objeto ExpandableField)
+        coupon_id = promo_coupon.id if hasattr(promo_coupon, 'id') else promo_coupon
 
-        # Si el cupón ya es una cadena (el ID), lo usamos. Si es un objeto, sacamos el id.
-        coupon_id = coupon_data.get("id") if hasattr(coupon_data, "get") else coupon_data
-
-        # 2. Recuperar el Cupón
+        # 2. Recuperar el Cupón y Precio (API Oficial: stripe.Coupon.retrieve)
         try:
             coupon = stripe.Coupon.retrieve(coupon_id)
             price_obj = stripe.Price.retrieve(price_id)
@@ -805,11 +805,9 @@ async def validate_promo_code(request: Request):
             log.error(f"StripeError al recuperar cupón/precio: {e.user_message}")
             raise HTTPException(status_code=400, detail="Error obteniendo los detalles del cupón desde Stripe.")
 
-        # 3. Validaciones de metadatos y restricciones
-        coupon_metadata = coupon.get("metadata") or {}
-        allowed_plans_meta = coupon_metadata.get("allowed_plans")
-        
-        if allowed_plans_meta:
+        # 3. Validaciones Oficiales (Usando hasattr para evitar AttributeError)
+        if hasattr(coupon, 'metadata') and coupon.metadata and "allowed_plans" in coupon.metadata:
+            allowed_plans_meta = coupon.metadata["allowed_plans"]
             allowed_list = [p.strip().lower() for p in allowed_plans_meta.split(",")]
             
             if current_plan_name not in allowed_list:
@@ -818,28 +816,26 @@ async def validate_promo_code(request: Request):
                     detail=f"Este cupón solo es válido para el plan {allowed_plans_meta.upper()}."
                 )
                 
-        else:
-            applies_to = coupon.get("applies_to") or {}
-            allowed_products = applies_to.get("products", [])
+        elif hasattr(coupon, 'applies_to') and coupon.applies_to and hasattr(coupon.applies_to, 'products'):
+            current_product_id = price_obj.product if hasattr(price_obj, 'product') else None
+            allowed_products = coupon.applies_to.products
             
-            if allowed_products:
-                current_product_id = price_obj.get("product")
-                if current_product_id not in allowed_products:
-                    raise HTTPException(status_code=400, detail="Código no válido para este plan.")
+            if current_product_id not in allowed_products:
+                raise HTTPException(status_code=400, detail="Código no válido para este plan.")
 
         # 4. Cálculo de descuentos
-        original_amount = price_obj.get("unit_amount")
+        original_amount = price_obj.unit_amount if hasattr(price_obj, 'unit_amount') else None
         if original_amount is None:
             raise HTTPException(status_code=400, detail="El precio no tiene un monto fijo compatible con descuentos.")
             
-        price_currency = price_obj.get("currency", "")
-        currency = price_currency.upper() if price_currency else ""
+        currency = price_obj.currency.upper() if hasattr(price_obj, 'currency') and price_obj.currency else ""
         final_amount = original_amount
         discount_desc = ""
 
-        percent_off = coupon.get("percent_off")
-        amount_off = coupon.get("amount_off")
-        coupon_currency = coupon.get("currency")
+        # Lectura de propiedades nativas según stripe/_coupon.py
+        percent_off = coupon.percent_off if hasattr(coupon, 'percent_off') else None
+        amount_off = coupon.amount_off if hasattr(coupon, 'amount_off') else None
+        coupon_currency = coupon.currency if hasattr(coupon, 'currency') else None
 
         if percent_off is not None:
             discount_amount = int(round(original_amount * (percent_off / 100)))
@@ -855,15 +851,17 @@ async def validate_promo_code(request: Request):
         if final_amount < 0: 
             final_amount = 0
 
+        coupon_name = coupon.name if hasattr(coupon, 'name') and coupon.name else promo_obj.code
+
         return {
             "valid": True,
-            "code": promo_obj.get("code"),
+            "code": promo_obj.code,
             "original_amount": original_amount,
             "final_amount": final_amount,
             "currency": currency,
             "description": discount_desc,
-            "coupon_name": coupon.get("name") or promo_obj.get("code"),
-            "promo_id": promo_obj.get("id")
+            "coupon_name": coupon_name,
+            "promo_id": promo_obj.id
         }
 
     except HTTPException as he:
