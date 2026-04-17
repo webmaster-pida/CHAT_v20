@@ -769,29 +769,34 @@ async def validate_promo_code(request: Request):
         if not current_plan_name:
              raise HTTPException(status_code=400, detail="El plan seleccionado no es válido en el sistema.")
 
-        # Protegemos la primera llamada a Stripe
         try:
             promos = stripe.PromotionCode.list(code=promo_code, active=True, limit=1)
         except Exception as e:
             raise HTTPException(status_code=500, detail="Error de conexión con Stripe al buscar la promoción.")
 
-        if not promos.data:
+        # Usamos .get() de forma segura en toda la estructura de Stripe
+        if not promos or not promos.get('data'):
             raise HTTPException(status_code=404, detail="El código promocional no es válido o ha expirado.")
 
-        promo_obj = promos.data[0]
+        promo_obj = promos.get('data')[0]
         
-        # Extracción segura del ID (por si la API devuelve un string o un objeto)
-        coupon_id = promo_obj.coupon if isinstance(promo_obj.coupon, str) else promo_obj.coupon.id
+        # Extraemos el cupón usando .get() para evitar KeyErrors
+        promo_coupon = promo_obj.get('coupon')
+        if not promo_coupon:
+            raise HTTPException(status_code=404, detail="Cupón no encontrado en la promoción.")
+            
+        coupon_id = promo_coupon.get('id') if hasattr(promo_coupon, 'get') else promo_coupon
         
-        # Hacemos TODAS las consultas a Stripe dentro de un bloque protegido
         try:
             coupon = stripe.Coupon.retrieve(coupon_id)
-            price_obj = stripe.Price.retrieve(price_id) # Solo hacemos esta llamada 1 vez
+            price_obj = stripe.Price.retrieve(price_id)
         except Exception as e:
             raise HTTPException(status_code=500, detail="Error obteniendo datos del cupón o precio desde Stripe.")
 
         # --- VALIDACIONES DE RESTRICCIONES ---
-        allowed_plans_meta = coupon.metadata.get("allowed_plans")
+        coupon_metadata = coupon.get("metadata") or {}
+        allowed_plans_meta = coupon_metadata.get("allowed_plans")
+        
         if allowed_plans_meta:
             allowed_list = [p.strip().lower() for p in allowed_plans_meta.split(",")]
             if current_plan_name not in allowed_list:
@@ -800,47 +805,50 @@ async def validate_promo_code(request: Request):
                     detail=f"Este cupón solo es válido para el plan {allowed_plans_meta.upper()}."
                 )
         elif coupon.get("applies_to"):
-            current_product_id = price_obj.product
-            allowed_products = coupon.applies_to.get("products", [])
+            current_product_id = price_obj.get("product")
+            applies_to = coupon.get("applies_to") or {}
+            allowed_products = applies_to.get("products", [])
             if allowed_products and current_product_id not in allowed_products:
                 raise HTTPException(status_code=400, detail="Código no válido para este plan.")
 
         # --- CÁLCULO DE DESCUENTOS ---
-        original_amount = price_obj.unit_amount 
-        
-        # Validación de seguridad por si es un precio sin monto fijo (metered billing)
+        original_amount = price_obj.get("unit_amount")
         if original_amount is None:
             raise HTTPException(status_code=400, detail="El precio no tiene un monto fijo compatible con descuentos.")
             
-        currency = price_obj.currency.upper()
+        currency = price_obj.get("currency", "").upper()
         final_amount = original_amount
         discount_desc = ""
 
-        if coupon.percent_off:
-            discount_amount = int(round(original_amount * (coupon.percent_off / 100)))
+        # Usamos .get() también aquí para evitar KeyError de 'percent_off' o 'amount_off'
+        percent_off = coupon.get("percent_off")
+        amount_off = coupon.get("amount_off")
+        coupon_currency = coupon.get("currency")
+
+        if percent_off:
+            discount_amount = int(round(original_amount * (percent_off / 100)))
             final_amount = original_amount - discount_amount
-            discount_desc = f"-{coupon.percent_off}%"
-        elif coupon.amount_off:
-            if coupon.currency and coupon.currency.upper() != currency:
+            discount_desc = f"-{percent_off}%"
+        elif amount_off:
+            if coupon_currency and coupon_currency.upper() != currency:
                 raise HTTPException(status_code=400, detail="La moneda del cupón no coincide con la del plan.")
-            final_amount = original_amount - coupon.amount_off
-            discount_desc = f"-${coupon.amount_off / 100:.2f} {currency}"
+            final_amount = original_amount - amount_off
+            discount_desc = f"-${amount_off / 100:.2f} {currency}"
 
         if final_amount < 0: final_amount = 0
 
         return {
             "valid": True,
-            "code": promo_obj.code,
+            "code": promo_obj.get("code"),
             "original_amount": original_amount,
             "final_amount": final_amount,
             "currency": currency,
             "description": discount_desc,
-            "coupon_name": coupon.name or promo_obj.code,
-            "promo_id": promo_obj.id
+            "coupon_name": coupon.get("name") or promo_obj.get("code"),
+            "promo_id": promo_obj.get("id")
         }
 
     except HTTPException as he:
-        # Re-lanzamos errores controlados al frontend (los 400 y 404)
         raise he
     except Exception as e:
         log.error(f"Error validando promo: {e}")
