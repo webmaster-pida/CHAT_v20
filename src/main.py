@@ -758,7 +758,7 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
 async def validate_promo_code(request: Request):
     try:
         data = await request.json()
-        promo_code = data.get("code", "").strip().upper()
+        promo_code = data.get("code", "").strip().upper() # Aseguramos mayúsculas
         price_id = data.get("priceId")
 
         if not promo_code or not price_id:
@@ -774,22 +774,19 @@ async def validate_promo_code(request: Request):
         except Exception as e:
             raise HTTPException(status_code=500, detail="Error de conexión con Stripe al buscar la promoción.")
 
-        # EXTRAEMOS DE FORMA SEGURA CON getattr()
-        promos_data = getattr(promos, 'data', [])
-        if not promos_data:
+        # promos.data es la forma oficial de leer listas en el SDK de Stripe
+        if not promos.data:
             raise HTTPException(status_code=404, detail="El código promocional no es válido o ha expirado.")
 
-        promo_obj = promos_data[0]
+        promo_obj = promos.data[0]
         
-        promo_coupon = getattr(promo_obj, 'coupon', None)
-        if not promo_coupon:
-            raise HTTPException(status_code=404, detail="Cupón no encontrado en la promoción.")
-            
-        # Si el cupón ya es una cadena (el ID), lo usamos. Si es un objeto, sacamos el id.
-        coupon_id = promo_coupon if isinstance(promo_coupon, str) else getattr(promo_coupon, 'id', None)
-        
-        if not coupon_id:
-            raise HTTPException(status_code=404, detail="ID del cupón no válido.")
+        # Extraemos el ID del cupón de forma natural
+        try:
+            promo_coupon = promo_obj.coupon
+            # Si Stripe devuelve el objeto expandido usamos .id, si devuelve solo el string usamos el string
+            coupon_id = promo_coupon.id if hasattr(promo_coupon, 'id') else promo_coupon
+        except Exception:
+            raise HTTPException(status_code=404, detail="Error leyendo el cupón asociado a este código.")
 
         try:
             coupon = stripe.Coupon.retrieve(coupon_id)
@@ -798,9 +795,8 @@ async def validate_promo_code(request: Request):
             raise HTTPException(status_code=500, detail="Error obteniendo datos del cupón o precio desde Stripe.")
 
         # --- VALIDACIONES DE RESTRICCIONES ---
-        coupon_metadata = getattr(coupon, 'metadata', {}) or {}
-        # Metadata a veces viene como dict, a veces como objeto
-        allowed_plans_meta = coupon_metadata.get("allowed_plans") if isinstance(coupon_metadata, dict) else getattr(coupon_metadata, 'allowed_plans', None)
+        coupon_metadata = coupon.metadata or {}
+        allowed_plans_meta = coupon_metadata.get("allowed_plans")
         
         if allowed_plans_meta:
             allowed_list = [p.strip().lower() for p in allowed_plans_meta.split(",")]
@@ -809,51 +805,43 @@ async def validate_promo_code(request: Request):
                     status_code=400, 
                     detail=f"Este cupón solo es válido para el plan {allowed_plans_meta.upper()}."
                 )
-        else:
-            applies_to = getattr(coupon, 'applies_to', None)
-            if applies_to:
-                current_product_id = getattr(price_obj, 'product', None)
-                allowed_products = applies_to.get("products", []) if isinstance(applies_to, dict) else getattr(applies_to, 'products', [])
-                if allowed_products and current_product_id not in allowed_products:
-                    raise HTTPException(status_code=400, detail="Código no válido para este plan.")
+        elif coupon.applies_to:
+            current_product_id = price_obj.product
+            allowed_products = coupon.applies_to.get("products", [])
+            if allowed_products and current_product_id not in allowed_products:
+                raise HTTPException(status_code=400, detail="Código no válido para este plan.")
 
         # --- CÁLCULO DE DESCUENTOS ---
-        original_amount = getattr(price_obj, 'unit_amount', None)
+        original_amount = price_obj.unit_amount
         if original_amount is None:
             raise HTTPException(status_code=400, detail="El precio no tiene un monto fijo compatible con descuentos.")
             
-        currency = getattr(price_obj, 'currency', "")
-        currency = currency.upper() if currency else ""
+        currency = price_obj.currency.upper() if price_obj.currency else ""
         
         final_amount = original_amount
         discount_desc = ""
 
-        # Usamos getattr() también aquí
-        percent_off = getattr(coupon, 'percent_off', None)
-        amount_off = getattr(coupon, 'amount_off', None)
-        coupon_currency = getattr(coupon, 'currency', None)
-
-        if percent_off:
-            discount_amount = int(round(original_amount * (percent_off / 100)))
+        if coupon.percent_off:
+            discount_amount = int(round(original_amount * (coupon.percent_off / 100)))
             final_amount = original_amount - discount_amount
-            discount_desc = f"-{percent_off}%"
-        elif amount_off:
-            if coupon_currency and coupon_currency.upper() != currency:
+            discount_desc = f"-{coupon.percent_off}%"
+        elif coupon.amount_off:
+            if coupon.currency and coupon.currency.upper() != currency:
                 raise HTTPException(status_code=400, detail="La moneda del cupón no coincide con la del plan.")
-            final_amount = original_amount - amount_off
-            discount_desc = f"-${amount_off / 100:.2f} {currency}"
+            final_amount = original_amount - coupon.amount_off
+            discount_desc = f"-${coupon.amount_off / 100:.2f} {currency}"
 
         if final_amount < 0: final_amount = 0
 
         return {
             "valid": True,
-            "code": getattr(promo_obj, 'code', promo_code),
+            "code": promo_obj.code,
             "original_amount": original_amount,
             "final_amount": final_amount,
             "currency": currency,
             "description": discount_desc,
-            "coupon_name": getattr(coupon, 'name', None) or getattr(promo_obj, 'code', promo_code),
-            "promo_id": getattr(promo_obj, 'id', None)
+            "coupon_name": coupon.name or promo_obj.code,
+            "promo_id": promo_obj.id
         }
 
     except HTTPException as he:
