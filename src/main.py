@@ -758,80 +758,81 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
 async def validate_promo_code(request: Request):
     try:
         data = await request.json()
-        promo_code = data.get("code", "").strip().upper() # Aseguramos mayúsculas
+        # Aseguramos coincidencia exacta forzando mayúsculas, tal cual exige Stripe
+        promo_code = data.get("code", "").strip().upper() 
         price_id = data.get("priceId")
 
         if not promo_code or not price_id:
             raise HTTPException(status_code=400, detail="Faltan datos requeridos.")
 
         current_plan_name = STRIPE_PRICE_MAP.get(price_id)
-
         if not current_plan_name:
              raise HTTPException(status_code=400, detail="El plan seleccionado no es válido en el sistema.")
 
+        # 1. Recuperar el Código de Promoción (API oficial: GET /v1/promotion_codes)
         try:
             promos = stripe.PromotionCode.list(code=promo_code, active=True, limit=1)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail="Error de conexión con Stripe al buscar la promoción.")
+        except stripe.error.StripeError as e:
+            log.error(f"StripeError al buscar promoción: {e.user_message}")
+            raise HTTPException(status_code=400, detail="Error de conexión con Stripe al buscar el código.")
 
-        # promos.data es la forma oficial de leer listas en el SDK de Stripe
         if not promos.data:
             raise HTTPException(status_code=404, detail="El código promocional no es válido o ha expirado.")
 
         promo_obj = promos.data[0]
         
-        # Extraemos el ID del cupón de forma natural
-        try:
-            promo_coupon = promo_obj.coupon
-            # Si Stripe devuelve el objeto expandido usamos .id, si devuelve solo el string usamos el string
-            coupon_id = promo_coupon.id if hasattr(promo_coupon, 'id') else promo_coupon
-        except Exception:
-            raise HTTPException(status_code=404, detail="Error leyendo el cupón asociado a este código.")
+        # En la SDK oficial, si no se expande, la propiedad relacionada es directamente el ID (string)
+        coupon_id = promo_obj.coupon.id if hasattr(promo_obj.coupon, 'id') else promo_obj.coupon
 
+        # 2. Recuperar el Cupón (API oficial: GET /v1/coupons/:id)
         try:
             coupon = stripe.Coupon.retrieve(coupon_id)
             price_obj = stripe.Price.retrieve(price_id)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail="Error obteniendo datos del cupón o precio desde Stripe.")
+        except stripe.error.StripeError as e:
+            log.error(f"StripeError al recuperar cupón/precio: {e.user_message}")
+            raise HTTPException(status_code=400, detail="Error obteniendo los detalles del cupón desde Stripe.")
 
-        # --- VALIDACIONES DE RESTRICCIONES ---
-        coupon_metadata = coupon.metadata or {}
-        allowed_plans_meta = coupon_metadata.get("allowed_plans")
-        
-        if allowed_plans_meta:
+        # 3. Validaciones de metadatos y restricciones (Acceso oficial por notación de punto)
+        if coupon.metadata and "allowed_plans" in coupon.metadata:
+            allowed_plans_meta = coupon.metadata["allowed_plans"]
             allowed_list = [p.strip().lower() for p in allowed_plans_meta.split(",")]
+            
             if current_plan_name not in allowed_list:
                 raise HTTPException(
                     status_code=400, 
                     detail=f"Este cupón solo es válido para el plan {allowed_plans_meta.upper()}."
                 )
-        elif coupon.applies_to:
+                
+        elif coupon.applies_to and coupon.applies_to.products:
             current_product_id = price_obj.product
-            allowed_products = coupon.applies_to.get("products", [])
-            if allowed_products and current_product_id not in allowed_products:
+            allowed_products = coupon.applies_to.products
+            
+            if current_product_id not in allowed_products:
                 raise HTTPException(status_code=400, detail="Código no válido para este plan.")
 
-        # --- CÁLCULO DE DESCUENTOS ---
+        # 4. Cálculo de descuentos
         original_amount = price_obj.unit_amount
         if original_amount is None:
             raise HTTPException(status_code=400, detail="El precio no tiene un monto fijo compatible con descuentos.")
             
         currency = price_obj.currency.upper() if price_obj.currency else ""
-        
         final_amount = original_amount
         discount_desc = ""
 
-        if coupon.percent_off:
+        # Uso de propiedades explícitas tal como define el objeto Coupon
+        if coupon.percent_off is not None:
             discount_amount = int(round(original_amount * (coupon.percent_off / 100)))
             final_amount = original_amount - discount_amount
             discount_desc = f"-{coupon.percent_off}%"
-        elif coupon.amount_off:
+            
+        elif coupon.amount_off is not None:
             if coupon.currency and coupon.currency.upper() != currency:
                 raise HTTPException(status_code=400, detail="La moneda del cupón no coincide con la del plan.")
             final_amount = original_amount - coupon.amount_off
             discount_desc = f"-${coupon.amount_off / 100:.2f} {currency}"
 
-        if final_amount < 0: final_amount = 0
+        if final_amount < 0: 
+            final_amount = 0
 
         return {
             "valid": True,
@@ -845,10 +846,10 @@ async def validate_promo_code(request: Request):
         }
 
     except HTTPException as he:
-        raise he
+        raise he 
     except Exception as e:
-        log.error(f"Error validando promo: {e}")
-        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+        log.error(f"Error de sistema no controlado: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error interno del servidor.")
 
 @app.post("/create-payment-intent", tags=["Billing"])
 async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, Any] = Depends(get_current_user)):
