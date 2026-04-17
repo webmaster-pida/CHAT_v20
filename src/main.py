@@ -769,18 +769,28 @@ async def validate_promo_code(request: Request):
         if not current_plan_name:
              raise HTTPException(status_code=400, detail="El plan seleccionado no es válido en el sistema.")
 
-        promos = stripe.PromotionCode.list(code=promo_code, active=True, limit=1)
+        # Protegemos la primera llamada a Stripe
+        try:
+            promos = stripe.PromotionCode.list(code=promo_code, active=True, limit=1)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="Error de conexión con Stripe al buscar la promoción.")
+
         if not promos.data:
             raise HTTPException(status_code=404, detail="El código promocional no es válido o ha expirado.")
 
         promo_obj = promos.data[0]
-        coupon_id = promo_obj.coupon.id
         
+        # Extracción segura del ID (por si la API devuelve un string o un objeto)
+        coupon_id = promo_obj.coupon if isinstance(promo_obj.coupon, str) else promo_obj.coupon.id
+        
+        # Hacemos TODAS las consultas a Stripe dentro de un bloque protegido
         try:
             coupon = stripe.Coupon.retrieve(coupon_id)
+            price_obj = stripe.Price.retrieve(price_id) # Solo hacemos esta llamada 1 vez
         except Exception as e:
-            raise HTTPException(status_code=500, detail="Error de conexión con Stripe.")
+            raise HTTPException(status_code=500, detail="Error obteniendo datos del cupón o precio desde Stripe.")
 
+        # --- VALIDACIONES DE RESTRICCIONES ---
         allowed_plans_meta = coupon.metadata.get("allowed_plans")
         if allowed_plans_meta:
             allowed_list = [p.strip().lower() for p in allowed_plans_meta.split(",")]
@@ -790,19 +800,19 @@ async def validate_promo_code(request: Request):
                     detail=f"Este cupón solo es válido para el plan {allowed_plans_meta.upper()}."
                 )
         elif coupon.get("applies_to"):
-            try:
-                price_obj = stripe.Price.retrieve(price_id)
-                current_product_id = price_obj.product
-                allowed_products = coupon.applies_to.get("products", [])
-                if allowed_products and current_product_id not in allowed_products:
-                    raise HTTPException(status_code=400, detail="Código no válido para este plan.")
-            except Exception:
-                pass 
+            current_product_id = price_obj.product
+            allowed_products = coupon.applies_to.get("products", [])
+            if allowed_products and current_product_id not in allowed_products:
+                raise HTTPException(status_code=400, detail="Código no válido para este plan.")
 
-        price_obj = stripe.Price.retrieve(price_id)
+        # --- CÁLCULO DE DESCUENTOS ---
         original_amount = price_obj.unit_amount 
+        
+        # Validación de seguridad por si es un precio sin monto fijo (metered billing)
+        if original_amount is None:
+            raise HTTPException(status_code=400, detail="El precio no tiene un monto fijo compatible con descuentos.")
+            
         currency = price_obj.currency.upper()
-
         final_amount = original_amount
         discount_desc = ""
 
@@ -811,8 +821,8 @@ async def validate_promo_code(request: Request):
             final_amount = original_amount - discount_amount
             discount_desc = f"-{coupon.percent_off}%"
         elif coupon.amount_off:
-            if coupon.currency.upper() != currency:
-                raise HTTPException(status_code=400, detail=f"Moneda incorrecta.")
+            if coupon.currency and coupon.currency.upper() != currency:
+                raise HTTPException(status_code=400, detail="La moneda del cupón no coincide con la del plan.")
             final_amount = original_amount - coupon.amount_off
             discount_desc = f"-${coupon.amount_off / 100:.2f} {currency}"
 
@@ -830,6 +840,7 @@ async def validate_promo_code(request: Request):
         }
 
     except HTTPException as he:
+        # Re-lanzamos errores controlados al frontend (los 400 y 404)
         raise he
     except Exception as e:
         log.error(f"Error validando promo: {e}")
