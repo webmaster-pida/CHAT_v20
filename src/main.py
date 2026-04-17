@@ -758,7 +758,7 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
 async def validate_promo_code(request: Request):
     try:
         data = await request.json()
-        promo_code = data.get("code", "").strip()
+        promo_code = data.get("code", "").strip().upper()
         price_id = data.get("priceId")
 
         if not promo_code or not price_id:
