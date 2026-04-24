@@ -101,7 +101,7 @@ async def generate_streaming_response(
                     text_buffer = re.sub(r'\n\s*\n\s*\n', '\n\n', text_buffer)
 
                     # BUFFERING INTELIGENTE PARA NO ROMPER ENLACES MARKDOWN
-                    if len(text_buffer) < 400: 
+                    if len(text_buffer) < 50: 
                         if any(text_buffer.strip().endswith(c) for c in ['[', '(', '*', '-', '>', '•', 'http', 'https']):
                             continue
                         yield text_buffer
