@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     LIMIT_BASICO_CHAT_DAILY: int = 5
     LIMIT_AVANZADO_CHAT_DAILY: int = 20
     LIMIT_PREMIUM_CHAT_DAILY: int = 100
+    MAX_EXPORT_LENGTH: int = 150000
 
     # --- CONTROL DE ACCESO ---
     ALLOWED_ORIGINS: Union[str, List[str]] = '["https://pida.iiresodh.org", "https://pida-ai.com", "https://pida-ai-v20.web.app", "http://localhost", "http://localhost:8080"]'
