@@ -726,8 +726,8 @@ async def download_chat(
             
         chat_text = "\n\n".join(chat_lines)
         
-        if len(chat_text) > 50000:
-            chat_text = chat_text[:50000] + "\n\n[Texto truncado por límite de seguridad]"
+        if len(chat_text) > settings.MAX_EXPORT_LENGTH:
+            chat_text = chat_text[:settings.MAX_EXPORT_LENGTH] + "\n\n[Texto truncado por límite de seguridad]"
 
         if file_format.lower() == "docx":
             content_bytes, mime, fname = await asyncio.to_thread(create_chat_docx_sync, chat_text, title)
