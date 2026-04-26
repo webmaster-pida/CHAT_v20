@@ -81,3 +81,21 @@ async def update_conversation_title(user_id: str, convo_id: str, new_title: str)
         log.info(f"Título de la conversación {convo_id} actualizado a '{new_title}'.")
     except Exception as e:
         log.error(f"Error al actualizar el título de la convo {convo_id}: {e}")
+
+async def send_email_notification(to_email: str | list, template_name: str, template_data: dict):
+    """Escribe en la colección 'mail' para disparar la extensión Trigger Email de Firebase."""
+    try:
+        # Si to_email es un string con comas (para varios admins), lo convertimos en lista
+        if isinstance(to_email, str) and ',' in to_email:
+            to_email = [email.strip() for email in to_email.split(',')]
+
+        await db.collection('mail').add({
+            'to': to_email,
+            'template': {
+                'name': template_name,
+                'data': template_data
+            }
+        })
+        log.info(f"Correo programado exitosamente para: {to_email}")
+    except Exception as e:
+        log.error(f"Error al intentar programar correo para {to_email}: {e}")
