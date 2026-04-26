@@ -1051,6 +1051,52 @@ async def stripe_webhook(request: Request):
                 await db.collection("customers").document(uid).set(update_data, merge=True)
                 log.info(f"🛡️ Webhook: {uid} set to {'active' if is_active else 'inactive'} ({stripe_status})")
 
+                # --- NUEVO: ENVIAR CORREOS DESPUÉS DE ACTIVAR ---
+                if is_active and event_type == 'customer.subscription.created':
+                    try:
+                        # 1. Intentar obtener el email y nombre desde la colección 'users'
+                        user_doc = await db.collection('users').document(uid).get()
+                        user_data = user_doc.to_dict() if user_doc.exists else {}
+                        
+                        customer_email = user_data.get('email')
+                        customer_name = user_data.get('displayName', 'Investigador')
+
+                        # 2. Plan B: Si no está en Firebase, extraerlo consultando a Stripe
+                        if not customer_email:
+                            customer_id = data_object.get('customer') # Extraemos el ID "cus_xxx"
+                            if customer_id:
+                                stripe_cust = stripe.Customer.retrieve(customer_id)
+                                customer_email = stripe_cust.get('email')
+                                if not customer_name or customer_name == 'Investigador':
+                                    customer_name = stripe_cust.get('name', 'Investigador')
+
+                        # 3. Solo enviamos si logramos conseguir el email
+                        if customer_email:
+                            
+                            # Correo de Bienvenida al Cliente
+                            await firestore_client.send_email_notification(
+                                to_email=customer_email,
+                                template_name='welcome-trial',
+                                template_data={'displayName': customer_name}
+                            )
+
+                            # Notificación al Administrador
+                            await firestore_client.send_email_notification(
+                                to_email=settings.ADMIN_EMAILS,
+                                template_name='admin-notification',
+                                template_data={
+                                    'customerName': customer_name,
+                                    'customerEmail': customer_email,
+                                    'planName': resolve_plan(data_object),
+                                    'date': datetime.now().strftime("%d/%m/%Y %H:%M")
+                                }
+                            )
+                        else:
+                            log.warning(f"⚠️ No se pudo enviar correo. No se encontró el email para el uid: {uid}")
+
+                    except Exception as e:
+                        log.error(f"Error al intentar enviar correos: {e}")
+
         # --- 2. PAGO EXITOSO (RENOVACIÓN O RECUPERACIÓN) ---
         elif event_type == 'invoice.payment_succeeded':
             subscription_id = data_object.get('subscription')
