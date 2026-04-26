@@ -1063,12 +1063,16 @@ async def stripe_webhook(request: Request):
 
                         # 2. Plan B: Si no está en Firebase, extraerlo consultando a Stripe
                         if not customer_email:
-                            customer_id = data_object.get('customer') # Extraemos el ID "cus_xxx"
+                            customer_id = data_object.get('customer') # Aquí sí funciona .get() porque data_object es un dict normal
                             if customer_id:
                                 stripe_cust = stripe.Customer.retrieve(customer_id)
-                                customer_email = stripe_cust.get('email')
+                                
+                                # En la SDK v11 de Stripe, no usamos .get(), usamos getattr()
+                                customer_email = getattr(stripe_cust, 'email', None)
+                                stripe_name = getattr(stripe_cust, 'name', None)
+                                
                                 if not customer_name or customer_name == 'Investigador':
-                                    customer_name = stripe_cust.get('name', 'Investigador')
+                                    customer_name = stripe_name if stripe_name else 'Investigador'
 
                         # 3. Solo enviamos si logramos conseguir el email
                         if customer_email:
