@@ -1084,9 +1084,9 @@ async def stripe_webhook(request: Request):
                                 template_data={'displayName': customer_name}
                             )
 
-                            # Notificación al Administrador
+                            # Notificación al Administrador (AQUÍ PONEMOS EL CORREO DIRECTO)
                             await firestore_client.send_email_notification(
-                                to_email=settings.ADMIN_EMAILS,
+                                to_email="contacto@pida-ai.com", # Reemplaza con el correo donde quieres recibir avisos
                                 template_name='admin-notification',
                                 template_data={
                                     'customerName': customer_name,
