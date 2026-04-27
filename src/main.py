@@ -962,15 +962,58 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             invoice_settings={"default_payment_method": payment_method_id}
         )
 
-        subscription = stripe.Subscription.create(
-            customer=customer.id,
-            items=[{'price': price_id}],
-            trial_period_days=trial_days if trial_days > 0 else None,
-            promotion_code=promo_id, 
-            default_payment_method=payment_method_id, 
-            expand=['latest_invoice.payment_intent', 'pending_setup_intent'], 
-            metadata={"uid": uid, "plan_key": plan_key}
-        )
+        # 1 USUARIO = 1 SUSCRIPCIÓN
+        
+        existing_subs = stripe.Subscription.list(customer=customer.id, limit=1)
+
+        if existing_subs.data:
+            # 1. EL USUARIO YA TIENE UNA SUSCRIPCIÓN (Puede estar activa, past_due, etc.)
+            sub = existing_subs.data[0]
+            sub_item_id = sub['items']['data'][0].id
+            
+            # Preparamos los datos a actualizar
+            modify_params = {
+                "default_payment_method": payment_method_id,
+                "expand": ['latest_invoice.payment_intent', 'pending_setup_intent'],
+                "metadata": {"uid": uid, "plan_key": plan_key}
+            }
+            
+            # Si introdujo un cupón, lo aplicamos
+            if promo_id: 
+                modify_params["promotion_code"] = promo_id
+                
+            # Si está cambiando de plan (ej: Básico a Premium), actualizamos el precio
+            if sub['items']['data'][0].price.id != price_id:
+                modify_params["items"] = [{"id": sub_item_id, "price": price_id}]
+                
+            # Actualizamos la suscripción en lugar de crear una nueva
+            subscription = stripe.Subscription.modify(sub.id, **modify_params)
+            
+            # IMPORTANTE: Si la suscripción estaba bloqueada por falta de pago (past_due),
+            # al meter la nueva tarjeta obligamos a Stripe a cobrar la factura pendiente AHORA.
+            if subscription.status in ['past_due', 'incomplete'] and subscription.latest_invoice:
+                try:
+                    invoice_id = subscription.latest_invoice.id if hasattr(subscription.latest_invoice, 'id') else subscription.latest_invoice
+                    stripe.Invoice.pay(invoice_id) # Cobramos el adeudo
+                    # Refrescamos la info de la suscripción para el Frontend
+                    subscription = stripe.Subscription.retrieve(sub.id, expand=['latest_invoice.payment_intent', 'pending_setup_intent'])
+                except stripe.error.CardError as e:
+                    # Si la NUEVA tarjeta también es declinada, le avisamos
+                    raise HTTPException(status_code=400, detail=f"La nueva tarjeta también fue declinada: {e.user_message}")
+                except Exception as e:
+                    log.error(f"Error al procesar el pago pendiente: {e}")
+
+        else:
+            # 2. ES UN USUARIO TOTALMENTE NUEVO, CREAMOS LA SUSCRIPCIÓN POR PRIMERA VEZ
+            subscription = stripe.Subscription.create(
+                customer=customer.id,
+                items=[{'price': price_id}],
+                trial_period_days=trial_days if trial_days > 0 else None,
+                promotion_code=promo_id, 
+                default_payment_method=payment_method_id, 
+                expand=['latest_invoice.payment_intent', 'pending_setup_intent'], 
+                metadata={"uid": uid, "plan_key": plan_key}
+            )
 
         if subscription.status == 'incomplete' and subscription.latest_invoice and subscription.latest_invoice.payment_intent:
             return {"clientSecret": subscription.latest_invoice.payment_intent.client_secret, "requiresAction": True}
@@ -1123,19 +1166,34 @@ async def stripe_webhook(request: Request):
         elif event_type in ['customer.subscription.deleted', 'invoice.payment_failed']:
             metadata = data_object.get('metadata') or {}
             uid = metadata.get('uid')
+            customer_id = data_object.get('customer') # Extraemos el ID del cliente
             
             if not uid and data_object.get('subscription'):
                 try:
                     sub = stripe.Subscription.retrieve(data_object.get('subscription'))
                     sub_meta = sub.get('metadata') or {}
                     uid = sub_meta.get('uid')
+                    if not customer_id:
+                        customer_id = sub.get('customer')
                 except Exception: pass
             
-            if uid:
-                await db.collection("customers").document(uid).set({
-                    "status": "inactive", "plan": "none", "updated_at": firestore.SERVER_TIMESTAMP
-                }, merge=True)
-                log.info(f"❌ Webhook: Suscripción terminada/fallida para {uid}.")
+            if uid and customer_id:
+                try:
+                    # VERIFICACIÓN INTELIGENTE: ¿Tiene OTRA suscripción sana? (Por clientes antiguos con duplicados)
+                    active_subs = stripe.Subscription.list(customer=customer_id, status='active', limit=1)
+                    trial_subs = stripe.Subscription.list(customer=customer_id, status='trialing', limit=1)
+                    
+                    if not active_subs.data and not trial_subs.data:
+                        # Solo apagamos el acceso si de verdad NO hay ninguna suscripción viva
+                        await db.collection("customers").document(uid).set({
+                            "status": "inactive", "plan": "none", "updated_at": firestore.SERVER_TIMESTAMP
+                        }, merge=True)
+                        log.info(f"❌ Webhook: Suscripción terminada/fallida para {uid}. Acceso revocado.")
+                    else:
+                        # Si tiene otra viva, ignoramos esta alerta de la suscripción muerta
+                        log.info(f"⚠️ Webhook: Fallo de pago ignorado para {uid}. El usuario mantiene otra suscripción activa/trialing.")
+                except Exception as e:
+                    log.error(f"Error verificando suscripciones paralelas para {uid}: {e}")
 
         return {"status": "success"}
 
