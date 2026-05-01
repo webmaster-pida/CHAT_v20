@@ -1,5 +1,6 @@
 # src/modules/firestore_client.py
 
+import datetime
 from google.cloud import firestore
 from src.config import settings, log
 from src.models.chat_models import ChatMessage
@@ -53,6 +54,18 @@ async def create_new_conversation(user_id: str, title: str) -> Dict[str, Any]:
             "title": title,
             "created_at": firestore.SERVER_TIMESTAMP
         })
+        
+        # --- NUEVO: ESTADÍSTICA MENSUAL DE CONVERSACIONES ---
+        try:
+            current_month = datetime.datetime.now().strftime("%Y-%m")
+            stats_ref = db.collection('monthly_stats').document(current_month)
+            await stats_ref.set({
+                "conversaciones": firestore.Increment(1)
+            }, merge=True)
+        except Exception as stats_e:
+            log.error(f"Error guardando estadística mensual de conversaciones: {stats_e}")
+        # ----------------------------------------------------
+        
         return {"id": doc_ref.id, "title": title}
     except Exception as e:
         log.error(f"Error al crear nueva conversación para el usuario {user_id}: {e}")
