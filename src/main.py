@@ -1069,14 +1069,24 @@ async def stripe_webhook(request: Request):
 
         # --- 1. CREACIÓN O ACTUALIZACIÓN (CAMBIO DE PLAN) ---
         if event_type in ['customer.subscription.created', 'customer.subscription.updated']:
-            metadata = data_object.get('metadata') or {}  # Asegura que sea un dict
+            metadata = data_object.get('metadata') or {}  
             uid = metadata.get('uid')
             stripe_status = data_object.get('status')
             
-            # Eliminamos la dependencia de has_pm porque causa falsos negativos
+            # Recuperar el email del cliente en Stripe
+            customer_id = data_object.get('customer')
+            customer_email = None
+            if customer_id:
+                try:
+                    stripe_cust = stripe.Customer.retrieve(customer_id)
+                    customer_email = getattr(stripe_cust, 'email', None)
+                except Exception as e:
+                    log.error(f"Error recuperando email del cliente {customer_id}: {e}")
+
             if uid:
+                # Ya no usamos has_pm, confiamos en el status de Stripe
                 is_active = stripe_status in ['active', 'trialing']
-                is_trial = (stripe_status == 'trialing')
+                is_trial = (stripe_status == 'trialing') 
                 
                 update_data = {
                     "status": "active" if is_active else "inactive",
@@ -1085,6 +1095,10 @@ async def stripe_webhook(request: Request):
                     "has_trial": is_trial,
                     "updated_at": firestore.SERVER_TIMESTAMP
                 }
+                
+                # GRABAR EL EMAIL SIEMPRE QUE EXISTA
+                if customer_email:
+                    update_data["email"] = customer_email
                 
                 if is_trial:
                     update_data["trial_used"] = True
@@ -1147,15 +1161,28 @@ async def stripe_webhook(request: Request):
             subscription_id = data_object.get('subscription')
             if subscription_id:
                 try:
-                    # En este caso sí usamos Stripe SDK porque necesitamos consultar a su API
                     sub = stripe.Subscription.retrieve(subscription_id)
                     metadata = getattr(sub, 'metadata', {})
                     uid = metadata.get('uid')
+                    
+                    # Recuperar el email del cliente vinculado a la factura
+                    customer_id = data_object.get('customer')
+                    customer_email = None
+                    if customer_id:
+                        stripe_cust = stripe.Customer.retrieve(customer_id)
+                        customer_email = getattr(stripe_cust, 'email', None)
+
                     if uid:
-                        await db.collection("customers").document(uid).set({
+                        update_data = {
                             "status": "active",
                             "updated_at": firestore.SERVER_TIMESTAMP
-                        }, merge=True)
+                        }
+                        
+                        # GRABAR EL EMAIL SIEMPRE QUE EXISTA
+                        if customer_email:
+                            update_data["email"] = customer_email
+                            
+                        await db.collection("customers").document(uid).set(update_data, merge=True)
                         log.info(f"✅ Webhook: Pago exitoso para {uid}. Estado activado.")
                 except Exception as e:
                     log.error(f"Error procesando invoice.payment_succeeded: {e}")
