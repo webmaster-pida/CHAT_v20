@@ -1073,12 +1073,10 @@ async def stripe_webhook(request: Request):
             uid = metadata.get('uid')
             stripe_status = data_object.get('status')
             
-            has_pm = data_object.get('default_payment_method') is not None or \
-                     data_object.get('default_source') is not None
-            
+            # Eliminamos la dependencia de has_pm porque causa falsos negativos
             if uid:
-                is_active = (stripe_status in ['active', 'trialing']) and has_pm
-                is_trial = (stripe_status == 'trialing') 
+                is_active = stripe_status in ['active', 'trialing']
+                is_trial = (stripe_status == 'trialing')
                 
                 update_data = {
                     "status": "active" if is_active else "inactive",
