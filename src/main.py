@@ -36,6 +36,14 @@ genai_client = genai.Client(vertexai=True, project=settings.GOOGLE_CLOUD_PROJECT
 # --- MODELOS DE PETICIÓN ---
 class VerificationRequest(BaseModel):
     frontend_url: str
+    display_name: str | None = "Investigador"  # <-- Añadimos este campo
+
+# 2. En tu endpoint /send-verification-email, cambia la línea de 'displayName'
+# Busca la sección donde construyes el template_data y déjala así:
+        template_data={
+            'verificationLink': custom_clean_link, 
+            'displayName': payload.display_name  # 👈 Ahora lee el nombre enviado directamente
+        }
 
 # MAPA DE TRADUCCIÓN: ID de Stripe -> Nombre del Plan interno para que no se equivoque
 STRIPE_PRICE_MAP = {
