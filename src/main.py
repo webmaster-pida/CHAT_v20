@@ -11,6 +11,11 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any
 
+# 👇 NUEVAS IMPORTACIONES AÑADIDAS
+from pydantic import BaseModel
+from urllib.parse import urlparse, parse_qs
+from firebase_admin import auth as firebase_auth
+
 # Librerías para documentos
 from docx import Document
 from fpdf import FPDF
@@ -27,6 +32,10 @@ from google import genai
 
 # Inicializar cliente global para utilidades dentro de main.py
 genai_client = genai.Client(vertexai=True, project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_LOCATION)
+
+# --- MODELOS DE PETICIÓN ---
+class VerificationRequest(BaseModel):
+    frontend_url: str
 
 # MAPA DE TRADUCCIÓN: ID de Stripe -> Nombre del Plan interno para que no se equivoque
 STRIPE_PRICE_MAP = {
@@ -572,6 +581,52 @@ Pregunta del usuario: {chat_request.prompt}
 @app.get("/status", tags=["Status"])
 def read_status():
     return {"status": "ok", "message": "PIDA Chat Backend v3.0 (Security Patched)"}
+
+# 👇 NUEVO ENDPOINT DE VERIFICACIÓN DINÁMICO AÑADIDO
+@app.post("/send-verification-email", tags=["Security"])
+async def send_custom_verification(
+    payload: VerificationRequest, 
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    try:
+        user_email = current_user.get("email")
+        
+        # 1. Configurar el retorno base de Firebase
+        action_code_settings = firebase_auth.ActionCodeSettings(
+            url=payload.frontend_url,
+            handle_code_in_app=False
+        )
+        
+        # 2. Generar el link estándar interno de Firebase
+        firebase_link = firebase_auth.generate_email_verification_link(
+            user_email, 
+            action_code_settings
+        )
+        
+        # 3. Extraer el oobCode (Token de seguridad) de forma quirúrgica
+        parsed_url = urlparse(firebase_link)
+        queries = parse_qs(parsed_url.query)
+        oob_code = queries.get("oobCode")[0]
+        
+        # 4. Construir tu link limpio hacia tu ruta de React (Evita pantallas de Google)
+        custom_clean_link = f"{payload.frontend_url}/auth-action?mode=verifyEmail&oobCode={oob_code}"
+        
+        # 5. Despachar usando tu propio cliente de notificaciones (Mismo que usa Stripe)
+        await firestore_client.send_email_notification(
+            to_email=user_email,
+            template_name='email-verification', # <- Asegúrate de crear este template en tu DB
+            template_data={
+                'verificationLink': custom_clean_link, 
+                'displayName': current_user.get('name', 'Investigador')
+            }
+        )
+        
+        log.info(f"Link de verificación dinámico generado para {user_email}")
+        return {"status": "ok", "message": "Enlace de verificación enviado correctamente."}
+        
+    except Exception as e:
+        log.error(f"Error generando correo de verificación: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error interno al generar el enlace de seguridad.")
 
 @app.get("/conversations", response_model=List[Dict[str, Any]], tags=["Chat History"])
 async def get_user_conversations(current_user: Dict[str, Any] = Depends(get_current_user)):
