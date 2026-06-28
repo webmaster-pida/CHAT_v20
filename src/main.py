@@ -619,13 +619,13 @@ async def send_custom_verification(
         # 4. Construir tu link limpio hacia tu ruta de React (Evita pantallas de Google)
         custom_clean_link = f"{payload.frontend_url}/auth-action?mode=verifyEmail&oobCode={oob_code}"
         
-        # 5. Despachar usando tu propio cliente de notificaciones (Mismo que usa Stripe)
+        # 5. Despachar usando tu propio cliente de notificaciones
         await firestore_client.send_email_notification(
             to_email=user_email,
-            template_name='email-verification', # <- Asegúrate de crear este template en tu DB
+            template_name='email-verification',
             template_data={
                 'verificationLink': custom_clean_link, 
-                'displayName': current_user.get('name', 'Investigador')
+                'displayName': payload.display_name
             }
         )
         
