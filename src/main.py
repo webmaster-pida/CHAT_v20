@@ -116,7 +116,6 @@ def write_markdown_to_pdf(pdf, text):
         # --- 1. PROCESAMIENTO DE TABLAS MARKDOWN ---
         if line.startswith('|') and line.endswith('|'):
             table_lines = []
-            # Agrupar todas las líneas de la tabla antes de dibujar
             while i < len(lines) and lines[i].strip().startswith('|') and lines[i].strip().endswith('|'):
                 table_lines.append(lines[i].strip())
                 i += 1
@@ -124,7 +123,6 @@ def write_markdown_to_pdf(pdf, text):
             for r_idx, t_line in enumerate(table_lines):
                 cols = [c.strip() for c in t_line.split('|')[1:-1]]
                 
-                # Ignorar filas separadoras (ej. |---|---|)
                 if all(re.match(r'^:?-+:?$', c) for c in cols):
                     continue
                 if not cols:
@@ -132,12 +130,11 @@ def write_markdown_to_pdf(pdf, text):
                     
                 col_width = effective_page_width / len(cols)
                 
-                # Función interna para calcular la altura dinámica de la celda
                 def get_cell_height(w, txt, is_bold):
                     pdf.set_font("Arial", "B" if is_bold else "", 10)
                     try: margin = pdf.c_margin
                     except: margin = 1
-                    usable_w = w - (2 * margin) # Restar márgenes internos de FPDF
+                    usable_w = w - (2 * margin)
                     
                     lines_count = 0
                     for p in str(txt).split('\n'):
@@ -154,10 +151,8 @@ def write_markdown_to_pdf(pdf, text):
                     return lines_count * 6
                 
                 is_header = (r_idx == 0)
-                # Calcular la altura de la fila basándose en la celda con más texto
                 max_height = max([get_cell_height(col_width, c.replace('**', '').replace('<br>', '\n').replace('<br/>', '\n'), is_bold=(is_header or '**' in c)) for c in cols] + [6])
                 
-                # Prevenir salto de página a la mitad de una fila
                 try: pb_trigger = pdf.page_break_trigger
                 except: pb_trigger = pdf.h - pdf.b_margin
                 if pdf.get_y() + max_height > pb_trigger:
@@ -166,45 +161,38 @@ def write_markdown_to_pdf(pdf, text):
                 x_start = pdf.get_x()
                 y_start = pdf.get_y()
                 
-                # Dibujar las celdas
                 for c_idx, col in enumerate(cols):
                     col_clean = col.replace('**', '')
                     col_clean = re.sub(r'<br\s*/?>', '\n', col_clean, flags=re.IGNORECASE)
                     
-                    # Dibujar fondo y contorno FIRST
                     if is_header:
-                        pdf.set_fill_color(241, 245, 249) # Azul muy claro tipo Tailwind (#f1f5f9)
+                        pdf.set_fill_color(241, 245, 249)
                         pdf.rect(x_start + (c_idx * col_width), y_start, col_width, max_height, 'DF')
                     else:
                         pdf.rect(x_start + (c_idx * col_width), y_start, col_width, max_height)
                     
-                    # Imprimir el texto encima
                     pdf.set_xy(x_start + (c_idx * col_width), y_start)
-                    pdf.set_font("Arial", "B" if "**" in col or is_header else "", 10)
+                    pdf.set_font("Arial", "B" if "装" in col or is_header else "", 10)
                     
                     if is_header:
-                        pdf.set_text_color(29, 53, 87) # Azul marino
+                        pdf.set_text_color(29, 53, 87)
                     else:
                         pdf.set_text_color(0, 0, 0)
                         
                     pdf.multi_cell(col_width, 6, col_clean, border=0, align='L')
                 
-                # Acomodar el cursor debajo de la fila recién dibujada
                 pdf.set_xy(x_start, y_start + max_height)
             
-            # Restaurar colores y fuentes al terminar la tabla
             pdf.set_font("Arial", "", 11)
             pdf.set_text_color(0, 0, 0)
             pdf.ln(5)
             continue
 
-        # --- 2. ESPACIOS VACÍOS ---
         if not line:
             pdf.ln(5)
             i += 1
             continue
 
-        # --- 3. ENCABEZADOS PRINCIPALES (##) ---
         if line.startswith('## '):
             pdf.ln(3)
             pdf.set_font("Arial", "B", 13)
@@ -216,7 +204,6 @@ def write_markdown_to_pdf(pdf, text):
             i += 1
             continue
             
-        # --- 4. SUBTÍTULOS (###) ---
         if line.startswith('### '):
             pdf.ln(2)
             pdf.set_font("Arial", "B", 12)
@@ -228,7 +215,6 @@ def write_markdown_to_pdf(pdf, text):
             i += 1
             continue
 
-        # --- 5. LISTAS Y PÁRRAFOS REGULARES ---
         if line.startswith('* ') or line.startswith('- '):
             pdf.set_x(15)
             line = "- " + line[2:]
@@ -300,7 +286,6 @@ def create_chat_docx_sync(chat_text: str, title: str) -> tuple:
                 for i, col in enumerate(cols):
                     if i < len(hdr_cells):
                         cell_text = re.sub(r'<br\s*/?>', '\n', col.replace('**', ''), flags=re.IGNORECASE)
-                        # Aplica negrita al encabezado DOCX
                         p = hdr_cells[i].paragraphs[0]
                         run = p.add_run(cell_text)
                         run.bold = True
@@ -387,8 +372,16 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
     admin_emails = settings.ADMIN_EMAILS
     email_domain = user_email.split("@")[-1] if "@" in user_email else ""
 
+    # CONDICIÓN EXTRAORDINARIA VIP: Los bypasses de administración no se tocan
     if (email_domain in admin_domains) or (user_email in admin_emails):
         return
+
+    # CONTROL ESTRICTO CONTRA CORREOS FALSOS / INEXISTENTES EN PRODUCCIÓN
+    if not email_verified:
+        raise HTTPException(
+            status_code=403, 
+            detail="Tu dirección de correo electrónico no ha sido verificada. Por favor, haz clic en el enlace enviado a tu bandeja antes de continuar utilizando el chat."
+        )
 
     try:
         user_doc = await db.collection("customers").document(user_id).get()
@@ -471,26 +464,22 @@ async def stream_chat_response_generator(chat_request: ChatRequest, country_code
         return f"data: {json.dumps(data)}\n\n"
 
     try:
-        # 👇 1. SOLUCIÓN A LA AMNESIA: Leemos el historial real de Firestore PRIMERO
         history_from_db = await firestore_client.get_conversation_messages(user_id, convo_id)
         
-        # 👇 2. SOLUCIÓN A LA CONDICIÓN DE CARRERA: Guardamos el mensaje actual en background
         user_message = ChatMessage(role="user", content=chat_request.prompt)
         asyncio.create_task(firestore_client.add_message_to_conversation(user_id, convo_id, user_message))
         
         yield create_sse_event({"event": "status", "message": "Iniciando..."})
         
-        # 👇 3. Preparamos el historial para Gemini (Usamos el de la BD)
         history_for_gemini = gemini_client.prepare_history_for_genai(history_from_db)
         
         search_query = chat_request.prompt
-        if history_from_db: # Si hay historial en la BD, encendemos el Enrutador
+        if history_from_db:
             yield create_sse_event({"event": "status", "message": "Contextualizando la búsqueda..."})
             try:
                 recent_history = history_from_db[-4:] 
                 context_text = "\n".join([f"{msg.role.upper()}: {msg.content}" for msg in recent_history])
                 
-                # Reformulador con Enrutamiento (Router) Ultra-Estricto
                 reformulation_prompt = f"""
 Instrucción: Actúa como un clasificador binario y reformulador estricto. Tu ÚNICA tarea es decidir si la pregunta necesita buscarse en internet.
 
@@ -504,7 +493,6 @@ Regla 2: Si la pregunta pide leyes o datos nuevos, reformúlala incluyendo el pa
 
 Respuesta (sin comillas, sin explicaciones):"""
                 
-                # Usamos el cliente asíncrono global que inicializamos arriba
                 response = await genai_client.aio.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=reformulation_prompt
@@ -517,11 +505,9 @@ Respuesta (sin comillas, sin explicaciones):"""
                 log.warning(f"Error reformulando la query, usando la original. Detalle: {e}")
                 search_query = chat_request.prompt
 
-        # Inicializamos los contextos vacíos por defecto
         rag_context = ""
         web_context = ""
 
-        # 👇 CONDICIÓN ROBUSTA: Validamos ignorando basura alrededor
         if "SKIP_SEARCH" not in search_query.upper():
             yield create_sse_event({"event": "status", "message": "Analizando fuentes y biblioteca privada..."})
             
@@ -537,7 +523,6 @@ Respuesta (sin comillas, sin explicaciones):"""
         
         yield create_sse_event({"event": "status", "message": "Formulando respuesta jurídica final..."})
         
-        # 👇 MEJORA 2: Válvula de escape en el Prompt Final para rechazar leyes extranjeras
         final_prompt = f"""Contexto geográfico principal: {country_code or 'General'}
 
 Toma en cuenta las fuentes proporcionadas. 
@@ -632,7 +617,6 @@ async def chat_stream_handler(
     country_code = request.headers.get('X-Country-Code', None)
     user_id = current_user['uid']
     user_email = current_user.get('email', '').strip().lower()
-    email_verified = current_user.get("email_verified", False)
     user_plan = 'none' 
 
     admin_domains = settings.ADMIN_DOMAINS
@@ -648,8 +632,6 @@ async def chat_stream_handler(
                 data = cust_doc.to_dict()
                 if data.get('status') == 'active':
                     user_plan = data.get('plan', 'basico')
-                    # if data.get('has_trial'):
-                        # user_plan = 'basico'
         except Exception as e:
             log.error(f"Error obteniendo plan usuario: {e}")
 
@@ -746,7 +728,6 @@ async def download_chat(
 @app.post("/check-vip-access", tags=["Security"])
 async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_current_user)):
     user_email = current_user.get("email", "").strip().lower()
-    email_verified = current_user.get("email_verified", False)
     admin_domains = settings.ADMIN_DOMAINS
     admin_emails = settings.ADMIN_EMAILS
     email_domain = user_email.split("@")[-1] if "@" in user_email else ""
@@ -758,7 +739,6 @@ async def check_vip_access_handler(current_user: Dict[str, Any] = Depends(get_cu
 async def validate_promo_code(request: Request):
     try:
         data = await request.json()
-        # Aseguramos coincidencia exacta forzando mayúsculas, tal cual exige Stripe
         promo_code = data.get("code", "").strip().upper() 
         price_id = data.get("priceId")
 
@@ -769,7 +749,6 @@ async def validate_promo_code(request: Request):
         if not current_plan_name:
              raise HTTPException(status_code=400, detail="El plan seleccionado no es válido en el sistema.")
 
-        # 1. Recuperar el Código de Promoción (API Oficial: stripe.PromotionCode.list)
         try:
             promos = stripe.PromotionCode.list(code=promo_code, active=True, limit=1)
         except stripe.error.StripeError as e:
@@ -781,23 +760,17 @@ async def validate_promo_code(request: Request):
 
         promo_obj = promos.data[0]
         
-        # ---------------------------------------------------------
-        # EXTRACCIÓN OFICIAL SEGÚN SDK v15+ (stripe/_promotion_code.py)
-        # El cupón se encuentra anidado dentro de la clase 'Promotion'
-        # ---------------------------------------------------------
         promo_coupon = None
         if hasattr(promo_obj, 'promotion') and promo_obj.promotion:
             promo_coupon = promo_obj.promotion.coupon
-        elif hasattr(promo_obj, 'coupon'): # Fallback de retrocompatibilidad
+        elif hasattr(promo_obj, 'coupon'):
             promo_coupon = promo_obj.coupon
             
         if not promo_coupon:
             raise HTTPException(status_code=404, detail="No se encontró un cupón asociado a esta promoción.")
 
-        # Extraemos el ID oficial (puede ser un string o un objeto ExpandableField)
         coupon_id = promo_coupon.id if hasattr(promo_coupon, 'id') else promo_coupon
 
-        # 2. Recuperar el Cupón y Precio (API Oficial: stripe.Coupon.retrieve)
         try:
             coupon = stripe.Coupon.retrieve(coupon_id)
             price_obj = stripe.Price.retrieve(price_id)
@@ -805,7 +778,6 @@ async def validate_promo_code(request: Request):
             log.error(f"StripeError al recuperar cupón/precio: {e.user_message}")
             raise HTTPException(status_code=400, detail="Error obteniendo los detalles del cupón desde Stripe.")
 
-        # 3. Validaciones Oficiales (Usando hasattr para evitar AttributeError)
         if hasattr(coupon, 'metadata') and coupon.metadata and "allowed_plans" in coupon.metadata:
             allowed_plans_meta = coupon.metadata["allowed_plans"]
             allowed_list = [p.strip().lower() for p in allowed_plans_meta.split(",")]
@@ -823,7 +795,6 @@ async def validate_promo_code(request: Request):
             if current_product_id not in allowed_products:
                 raise HTTPException(status_code=400, detail="Código no válido para este plan.")
 
-        # 4. Cálculo de descuentos
         original_amount = price_obj.unit_amount if hasattr(price_obj, 'unit_amount') else None
         if original_amount is None:
             raise HTTPException(status_code=400, detail="El precio no tiene un monto fijo compatible con descuentos.")
@@ -832,7 +803,6 @@ async def validate_promo_code(request: Request):
         final_amount = original_amount
         discount_desc = ""
 
-        # Lectura de propiedades nativas según stripe/_coupon.py
         percent_off = coupon.percent_off if hasattr(coupon, 'percent_off') else None
         amount_off = coupon.amount_off if hasattr(coupon, 'amount_off') else None
         coupon_currency = coupon.currency if hasattr(coupon, 'currency') else None
@@ -872,6 +842,19 @@ async def validate_promo_code(request: Request):
         
 @app.post("/create-payment-intent", tags=["Billing"])
 async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, Any] = Depends(get_current_user)):
+    user_email = current_user.get("email", "").strip().lower()
+    email_domain = user_email.split("@")[-1] if "@" in user_email else ""
+    
+    # 1. Bypass inteligente para las cuentas VIP del backend en variables de entorno
+    is_admin = (email_domain in settings.ADMIN_DOMAINS) or (user_email in settings.ADMIN_EMAILS)
+    
+    # 2. BLINDAJE DE STRIPE: Impedir intenciones de cobro a correos no verificados, a menos que sean admin
+    if not current_user.get("email_verified", False) and not is_admin:
+        raise HTTPException(
+            status_code=403, 
+            detail="Operación denegada. Debes verificar tu correo electrónico antes de adquirir un plan."
+        )
+
     try:
         user_email = current_user.get("email")
         uid = current_user["uid"]
@@ -961,50 +944,38 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
             customer.id,
             invoice_settings={"default_payment_method": payment_method_id}
         )
-
-        # 1 USUARIO = 1 SUSCRIPCIÓN
         
         existing_subs = stripe.Subscription.list(customer=customer.id, limit=1)
 
         if existing_subs.data:
-            # 1. EL USUARIO YA TIENE UNA SUSCRIPCIÓN (Puede estar activa, past_due, etc.)
             sub = existing_subs.data[0]
             sub_item_id = sub['items']['data'][0].id
             
-            # Preparamos los datos a actualizar
             modify_params = {
                 "default_payment_method": payment_method_id,
                 "expand": ['latest_invoice.payment_intent', 'pending_setup_intent'],
                 "metadata": {"uid": uid, "plan_key": plan_key}
             }
             
-            # Si introdujo un cupón, lo aplicamos
             if promo_id: 
                 modify_params["promotion_code"] = promo_id
                 
-            # Si está cambiando de plan (ej: Básico a Premium), actualizamos el precio
             if sub['items']['data'][0].price.id != price_id:
                 modify_params["items"] = [{"id": sub_item_id, "price": price_id}]
                 
-            # Actualizamos la suscripción en lugar de crear una nueva
             subscription = stripe.Subscription.modify(sub.id, **modify_params)
             
-            # IMPORTANTE: Si la suscripción estaba bloqueada por falta de pago (past_due),
-            # al meter la nueva tarjeta obligamos a Stripe a cobrar la factura pendiente AHORA.
             if subscription.status in ['past_due', 'incomplete'] and subscription.latest_invoice:
                 try:
                     invoice_id = subscription.latest_invoice.id if hasattr(subscription.latest_invoice, 'id') else subscription.latest_invoice
-                    stripe.Invoice.pay(invoice_id) # Cobramos el adeudo
-                    # Refrescamos la info de la suscripción para el Frontend
+                    stripe.Invoice.pay(invoice_id)
                     subscription = stripe.Subscription.retrieve(sub.id, expand=['latest_invoice.payment_intent', 'pending_setup_intent'])
                 except stripe.error.CardError as e:
-                    # Si la NUEVA tarjeta también es declinada, le avisamos
                     raise HTTPException(status_code=400, detail=f"La nueva tarjeta también fue declinada: {e.user_message}")
                 except Exception as e:
                     log.error(f"Error al procesar el pago pendiente: {e}")
 
         else:
-            # 2. ES UN USUARIO TOTALMENTE NUEVO, CREAMOS LA SUSCRIPCIÓN POR PRIMERA VEZ
             subscription = stripe.Subscription.create(
                 customer=customer.id,
                 items=[{'price': price_id}],
@@ -1041,11 +1012,8 @@ async def stripe_webhook(request: Request):
             log.error("⚠️ STRIPE_WEBHOOK_SECRET no está configurado.")
             return Response(content="Webhook secret missing", status_code=500)
 
-        # 1. Validar la firma con la SDK de Stripe
         stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
         
-        # 2. Parsear el payload a un diccionario puro de Python
-        # Esto EVITA los errores "get" que estabas recibiendo de los StripeObject
         event_dict = json.loads(payload)
         event_type = event_dict.get('type')
         data_object = event_dict.get('data', {}).get('object', {})
@@ -1053,7 +1021,6 @@ async def stripe_webhook(request: Request):
         log.info(f"📩 Webhook recibido de forma segura: {event_type}")
 
         def resolve_plan(sub_obj):
-            """Extracción robusta usando diccionarios puros de Python"""
             try:
                 items = sub_obj.get('items', {})
                 if not items: return "none"
@@ -1067,13 +1034,11 @@ async def stripe_webhook(request: Request):
                 log.error(f"Error en resolve_plan: {e}")
                 return "none"
 
-        # --- 1. CREACIÓN O ACTUALIZACIÓN (CAMBIO DE PLAN) ---
         if event_type in ['customer.subscription.created', 'customer.subscription.updated']:
             metadata = data_object.get('metadata') or {}  
             uid = metadata.get('uid')
             stripe_status = data_object.get('status')
             
-            # Recuperar el email del cliente en Stripe
             customer_id = data_object.get('customer')
             customer_email = None
             if customer_id:
@@ -1084,7 +1049,6 @@ async def stripe_webhook(request: Request):
                     log.error(f"Error recuperando email del cliente {customer_id}: {e}")
 
             if uid:
-                # Ya no usamos has_pm, confiamos en el status de Stripe
                 is_active = stripe_status in ['active', 'trialing']
                 is_trial = (stripe_status == 'trialing') 
                 
@@ -1096,7 +1060,6 @@ async def stripe_webhook(request: Request):
                     "updated_at": firestore.SERVER_TIMESTAMP
                 }
                 
-                # GRABAR EL EMAIL SIEMPRE QUE EXISTA
                 if customer_email:
                     update_data["email"] = customer_email
                 
@@ -1106,42 +1069,33 @@ async def stripe_webhook(request: Request):
                 await db.collection("customers").document(uid).set(update_data, merge=True)
                 log.info(f"🛡️ Webhook: {uid} set to {'active' if is_active else 'inactive'} ({stripe_status})")
 
-                # --- NUEVO: ENVIAR CORREOS DESPUÉS DE ACTIVAR ---
                 if is_active and event_type == 'customer.subscription.created':
                     try:
-                        # 1. Intentar obtener el email y nombre desde la colección 'users'
                         user_doc = await db.collection('users').document(uid).get()
                         user_data = user_doc.to_dict() if user_doc.exists else {}
                         
                         customer_email = user_data.get('email')
                         customer_name = user_data.get('displayName', 'Investigador')
 
-                        # 2. Plan B: Si no está en Firebase, extraerlo consultando a Stripe
                         if not customer_email:
-                            customer_id = data_object.get('customer') # Aquí sí funciona .get() porque data_object es un dict normal
+                            customer_id = data_object.get('customer')
                             if customer_id:
                                 stripe_cust = stripe.Customer.retrieve(customer_id)
-                                
-                                # En la SDK v11 de Stripe, no usamos .get(), usamos getattr()
                                 customer_email = getattr(stripe_cust, 'email', None)
                                 stripe_name = getattr(stripe_cust, 'name', None)
                                 
                                 if not customer_name or customer_name == 'Investigador':
                                     customer_name = stripe_name if stripe_name else 'Investigador'
 
-                        # 3. Solo enviamos si logramos conseguir el email
                         if customer_email:
-                            
-                            # Correo de Bienvenida al Cliente
                             await firestore_client.send_email_notification(
                                 to_email=customer_email,
                                 template_name='welcome-trial',
                                 template_data={'displayName': customer_name}
                             )
 
-                            # Notificación al Administrador (AQUÍ PONEMOS EL CORREO DIRECTO)
                             await firestore_client.send_email_notification(
-                                to_email="contacto@pida-ai.com", # Reemplaza con el correo donde quieres recibir avisos
+                                to_email="contacto@pida-ai.com",
                                 template_name='admin-notification',
                                 template_data={
                                     'customerName': customer_name,
@@ -1156,7 +1110,6 @@ async def stripe_webhook(request: Request):
                     except Exception as e:
                         log.error(f"Error al intentar enviar correos: {e}")
 
-        # --- 2. PAGO EXITOSO (RENOVACIÓN O RECUPERACIÓN) ---
         elif event_type == 'invoice.payment_succeeded':
             subscription_id = data_object.get('subscription')
             if subscription_id:
@@ -1165,7 +1118,6 @@ async def stripe_webhook(request: Request):
                     metadata = getattr(sub, 'metadata', {})
                     uid = metadata.get('uid')
                     
-                    # Recuperar el email del cliente vinculado a la factura
                     customer_id = data_object.get('customer')
                     customer_email = None
                     if customer_id:
@@ -1178,7 +1130,6 @@ async def stripe_webhook(request: Request):
                             "updated_at": firestore.SERVER_TIMESTAMP
                         }
                         
-                        # GRABAR EL EMAIL SIEMPRE QUE EXISTA
                         if customer_email:
                             update_data["email"] = customer_email
                             
@@ -1187,11 +1138,10 @@ async def stripe_webhook(request: Request):
                 except Exception as e:
                     log.error(f"Error procesando invoice.payment_succeeded: {e}")
 
-        # --- 3. CANCELACIÓN O FALLO DE PAGO ---
         elif event_type in ['customer.subscription.deleted', 'invoice.payment_failed']:
             metadata = data_object.get('metadata') or {}
             uid = metadata.get('uid')
-            customer_id = data_object.get('customer') # Extraemos el ID del cliente
+            customer_id = data_object.get('customer')
             
             if not uid and data_object.get('subscription'):
                 try:
@@ -1204,18 +1154,15 @@ async def stripe_webhook(request: Request):
             
             if uid and customer_id:
                 try:
-                    # VERIFICACIÓN INTELIGENTE: ¿Tiene OTRA suscripción sana? (Por clientes antiguos con duplicados)
                     active_subs = stripe.Subscription.list(customer=customer_id, status='active', limit=1)
                     trial_subs = stripe.Subscription.list(customer=customer_id, status='trialing', limit=1)
                     
                     if not active_subs.data and not trial_subs.data:
-                        # Solo apagamos el acceso si de verdad NO hay ninguna suscripción viva
                         await db.collection("customers").document(uid).set({
                             "status": "inactive", "plan": "none", "updated_at": firestore.SERVER_TIMESTAMP
                         }, merge=True)
                         log.info(f"❌ Webhook: Suscripción terminada/fallida para {uid}. Acceso revocado.")
                     else:
-                        # Si tiene otra viva, ignoramos esta alerta de la suscripción muerta
                         log.info(f"⚠️ Webhook: Fallo de pago ignorado para {uid}. El usuario mantiene otra suscripción activa/trialing.")
                 except Exception as e:
                     log.error(f"Error verificando suscripciones paralelas para {uid}: {e}")
@@ -1226,7 +1173,6 @@ async def stripe_webhook(request: Request):
         log.error(f"❌ Firma de Webhook inválida: {e}")
         return Response(content="Invalid signature", status_code=400)
     except Exception as e:
-        # Esto capturará cualquier otro error e informará exactamente qué falló en los logs
         error_msg = f"Error interno: {type(e).__name__} - {str(e)}"
         log.error(f"💥 Error crítico en Webhook: {error_msg}", exc_info=True)
         return Response(content=error_msg, status_code=500)
