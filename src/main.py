@@ -533,7 +533,12 @@ Respuesta (sin comillas, sin explicaciones):"""
         
         yield create_sse_event({"event": "status", "message": "Formulando respuesta jurídica final..."})
         
-        final_prompt = f"""Contexto geográfico principal: {country_code or 'General'}
+        # 1. Se obtiene la fecha actual usando función existente
+        fecha_actual = get_date_utc_minus_6()
+        
+        # 2. Inyecta la fecha en la primera línea del final_prompt
+        final_prompt = f"""Fecha actual del sistema: {fecha_actual}
+Contexto geográfico principal: {country_code or 'General'}
 
 Toma en cuenta las fuentes proporcionadas. 
 IMPORTANTE: No uses '[INVESTIGACIÓN WEB RECIENTE]' como nombre de fuente. Extrae el nombre real del sitio web (ej: ONU, Amnistía, Wikipedia) desde la URL proporcionada.
