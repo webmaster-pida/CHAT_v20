@@ -61,9 +61,9 @@ STRIPE_PRICE_MAP = {
 
 # --- LÍMITES DE CHAT (POR PREGUNTA) ---
 CHAT_LIMITS = {
-    "basico": settings.LIMIT_BASICO_CHAT_DAILY,      # 5
-    "avanzado": settings.LIMIT_AVANZADO_CHAT_DAILY,  # 20
-    "premium": settings.LIMIT_PREMIUM_CHAT_DAILY,    # 100
+    "basico": settings.LIMIT_BASICO_CHAT_MONTHLY,      
+    "avanzado": settings.LIMIT_AVANZADO_CHAT_MONTHLY,  
+    "premium": settings.LIMIT_PREMIUM_CHAT_MONTHLY,    
     "vip": -1                                        # Ilimitado
 }
 
@@ -409,6 +409,12 @@ def get_date_utc_minus_6() -> str:
     cst_now = utc_now - timedelta(hours=6)
     return cst_now.strftime('%Y-%m-%d')
 
+# NUEVA FUNCIÓN PARA LÍMITES MENSUALES
+def get_month_utc_minus_6() -> str:
+    utc_now = datetime.now(timezone.utc)
+    cst_now = utc_now - timedelta(hours=6)
+    return cst_now.strftime('%Y-%m') # Formato: YYYY-MM
+
 # --- LÓGICA DE CONTROL DE LÍMITES POR PREGUNTA ---
 async def consume_chat_credit(user_id: str, plan: str):
     plan_key = plan.lower().replace('á', 'a').strip()
@@ -416,8 +422,9 @@ async def consume_chat_credit(user_id: str, plan: str):
     
     if limit == -1: return
 
-    today = get_date_utc_minus_6()
-    stats_ref = db.collection('users').document(user_id).collection('usage_stats').document(today)
+    # Usamos el mes actual para agrupar los créditos de todo el mes
+    current_month = get_month_utc_minus_6()
+    stats_ref = db.collection('users').document(user_id).collection('usage_stats').document(current_month)
     
     @firestore.async_transactional
     async def check_and_increment(transaction, ref):
@@ -428,7 +435,7 @@ async def consume_chat_credit(user_id: str, plan: str):
         if current_count >= limit:
             raise HTTPException(
                 status_code=429, 
-                detail=f"Límite diario alcanzado para el plan {plan_key}"
+                detail=f"Límite mensual alcanzado para el plan {plan_key}" # Mensaje actualizado
             )
         
         transaction.set(ref, {
@@ -440,8 +447,9 @@ async def consume_chat_credit(user_id: str, plan: str):
     await check_and_increment(transaction, stats_ref)
 
 async def refund_chat_credit(user_id: str):
-    today = get_date_utc_minus_6()
-    stats_ref = db.collection('users').document(user_id).collection('usage_stats').document(today)
+    # Usamos el mes actual para devolver el crédito al mes correspondiente
+    current_month = get_month_utc_minus_6()
+    stats_ref = db.collection('users').document(user_id).collection('usage_stats').document(current_month)
     
     @firestore.async_transactional
     async def check_and_decrement(transaction, ref):
