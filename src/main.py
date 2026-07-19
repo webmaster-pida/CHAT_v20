@@ -376,7 +376,6 @@ def create_chat_pdf_sync(chat_text: str, title: str) -> tuple[bytes, str, str]:
 async def verify_active_subscription(current_user: Dict[str, Any]):
     user_id = current_user.get("uid")
     user_email = current_user.get("email", "").strip().lower()
-    email_verified = current_user.get("email_verified", False)
     
     admin_domains = settings.ADMIN_DOMAINS
     admin_emails = settings.ADMIN_EMAILS
@@ -386,20 +385,14 @@ async def verify_active_subscription(current_user: Dict[str, Any]):
     if (email_domain in admin_domains) or (user_email in admin_emails):
         return
 
-    # CONTROL ESTRICTO CONTRA CORREOS FALSOS / INEXISTENTES EN PRODUCCIÓN
-    if not email_verified:
-        raise HTTPException(
-            status_code=403, 
-            detail="Tu dirección de correo electrónico no ha sido verificada. Por favor, haz clic en el enlace enviado a tu bandeja antes de continuar utilizando el chat."
-        )
-
     try:
         user_doc = await db.collection("customers").document(user_id).get()
         if user_doc.exists and user_doc.to_dict().get("status") == "active":
             return 
         
         raise HTTPException(status_code=403, detail="Suscripción inactiva o requiere tarjeta válida.")
-    except HTTPException as e: raise e
+    except HTTPException as e: 
+        raise e
     except Exception as e:
         log.error(f"Error Verificación: {e}")
         raise HTTPException(status_code=500, detail="Error de servidor.")
