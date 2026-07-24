@@ -559,6 +559,7 @@ INSTRUCCIÓN CRÍTICA DE ENLACES:
 3. ES OBLIGATORIO que los enlaces válidos aparezcan incrustados dentro de los párrafos. Si todas las fuentes web fueron descartadas por ser de otro país irrelevante, básate solo en tu conocimiento y el RAG, y no pongas enlaces web.
 
 Pregunta del usuario: {chat_request.prompt}
+⚠️ REGLA FINAL: Verifica la existencia real de lo que pide el usuario antes de responder. No asumas su premisa como verdadera.
 """
         
         full_response_text = ""
