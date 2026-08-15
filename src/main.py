@@ -594,16 +594,16 @@ Pregunta del usuario: {chat_request.prompt}
 def read_status():
     return {"status": "ok", "message": "PIDA Chat Backend v3.0 (Security Patched)"}
 
-# 👇 ENDPOINT PARA EL LEAD MAGNET (TRY-BEFORE-YOU-BUY) BLINDADO POR ANON-ID Y SIN RAG
+# 👇 NUEVO ENDPOINT PARA EL LEAD MAGNET (TRY-BEFORE-YOU-BUY) BLINDADO POR ANON-ID Y SIN PERPLEXITY
 @app.post("/teaser-chat", tags=["Lead Magnet"])
 async def teaser_chat_stream_handler(request: Request, body: TeaserRequest):
     """
     Endpoint público para la Landing Page.
-    Cortado a 500 caracteres (sin RAG para máxima velocidad) y protegido por ID de Navegador.
+    Cortado a 500 caracteres, solo con RAG (sin Perplexity) y protegido por ID de Navegador.
     """
     country_code = request.headers.get('X-Country-Code', 'General')
     
-    # 1. OBTENER EL SELLO DEL NAVEGADOR EN LUGAR DE LA IP
+    # 1. OBTENER EL SELLO DEL NAVEGADOR
     anon_id = request.headers.get("X-Anon-ID")
     
     if not anon_id:
@@ -630,12 +630,17 @@ async def teaser_chat_stream_handler(request: Request, body: TeaserRequest):
     
     async def restricted_stream_generator():
         try:
-            # 3. GENERACIÓN INMEDIATA (Se quitó el RAG para mayor velocidad)
-            yield f"data: {json.dumps({'event': 'status', 'message': 'Analizando consulta y redactando fundamento jurídico...'})}\n\n"
+            yield f"data: {json.dumps({'event': 'status', 'message': 'Consultando biblioteca del IIRESODH...'})}\n\n"
+            
+            # 3. BÚSQUEDA SOLO EN RAG (Sin Perplexity)
+            rag_context = await rag_client.search_internal_documents(body.prompt)
+            
+            yield f"data: {json.dumps({'event': 'status', 'message': 'Redactando fundamento jurídico...'})}\n\n"
             
             prompt_teaser = f"""
-            Escribe una introducción jurídica muy profesional y fundamentada para la siguiente consulta utilizando tu conocimiento experto en la materia.
+            Escribe una introducción jurídica muy profesional y fundamentada para la siguiente consulta utilizando el conocimiento proporcionado.
             
+            Contexto: {rag_context}
             Consulta: {body.prompt}
             
             Comienza directamente con la respuesta, citando la CADH o jurisprudencia de la Corte IDH si aplica.
