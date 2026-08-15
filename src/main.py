@@ -38,6 +38,10 @@ class VerificationRequest(BaseModel):
     frontend_url: str
     display_name: str | None = "Investigador"  # <-- Añadimos este campo
 
+# 👇 NUEVO: Modelo para el Teaser de la Landing Page
+class TeaserRequest(BaseModel):
+    prompt: str
+
 # MAPA DE TRADUCCIÓN: ID de Stripe -> Nombre del Plan interno para que no se equivoque
 STRIPE_PRICE_MAP = {
     # BÁSICO
@@ -589,6 +593,63 @@ Pregunta del usuario: {chat_request.prompt}
 @app.get("/status", tags=["Status"])
 def read_status():
     return {"status": "ok", "message": "PIDA Chat Backend v3.0 (Security Patched)"}
+
+# 👇 NUEVO ENDPOINT PARA EL LEAD MAGNET (TRY-BEFORE-YOU-BUY)
+@app.post("/teaser-chat", tags=["Lead Magnet"])
+async def teaser_chat_stream_handler(request: Request, body: TeaserRequest):
+    """
+    Endpoint público para la Landing Page.
+    Responde a la consulta pero corta el stream a los 400 caracteres para obligar al registro
+    y proteger los costos de API. No requiere autenticación.
+    """
+    country_code = request.headers.get('X-Country-Code', 'General')
+    
+    async def restricted_stream_generator():
+        try:
+            yield f"data: {json.dumps({'event': 'status', 'message': 'Consultando biblioteca del IIRESODH...'})}\n\n"
+            
+            # 1. Búsqueda rápida en el RAG
+            rag_context = await rag_client.search_internal_documents(body.prompt)
+            
+            yield f"data: {json.dumps({'event': 'status', 'message': 'Redactando fundamento jurídico...'})}\n\n"
+            
+            prompt_teaser = f"""
+            Escribe una introducción jurídica muy profesional y fundamentada para la siguiente consulta.
+            Contexto: {rag_context}
+            Consulta: {body.prompt}
+            
+            Comienza directamente con la respuesta, citando la CADH o Corte IDH si aplica.
+            """
+            
+            char_count = 0
+            
+            # Usamos el cliente base para generar la respuesta rápida
+            async for chunk in gemini_client.generate_streaming_response(
+                system_prompt="Eres PIDA, experto en Derechos Humanos.",
+                prompt=prompt_teaser,
+                history=[],
+                trusted_urls=set() 
+            ):
+                yield f"data: {json.dumps({'text': chunk})}\n\n"
+                
+                char_count += len(chunk)
+                # EL TRUCO: Cortamos a los 400 caracteres para obligar al registro
+                if char_count > 400:
+                    break 
+                    
+            # Señal para que el frontend sepa que debe poner el Blur
+            yield f"data: {json.dumps({'event': 'blur_ready'})}\n\n"
+            
+        except Exception as e:
+            log.error(f"Error en teaser chat: {e}", exc_info=True)
+            yield f"data: {json.dumps({'error': 'Error procesando tu consulta inicial.'})}\n\n"
+
+    headers = { 
+        "Content-Type": "text/event-stream", 
+        "Cache-Control": "no-cache", 
+        "Connection": "keep-alive" 
+    }
+    return StreamingResponse(restricted_stream_generator(), headers=headers)
 
 # 👇 NUEVO ENDPOINT DE VERIFICACIÓN DINÁMICO AÑADIDO
 @app.post("/send-verification-email", tags=["Security"])
