@@ -594,12 +594,13 @@ Pregunta del usuario: {chat_request.prompt}
 def read_status():
     return {"status": "ok", "message": "PIDA Chat Backend v3.0 (Security Patched)"}
 
-# 👇 NUEVO ENDPOINT PARA EL LEAD MAGNET (TRY-BEFORE-YOU-BUY) BLINDADO POR ANON-ID Y SIN PERPLEXITY
+# 👇 ENDPOINT PARA EL LEAD MAGNET (TRY-BEFORE-YOU-BUY) 100% REAL Y COMPLETO
 @app.post("/teaser-chat", tags=["Lead Magnet"])
 async def teaser_chat_stream_handler(request: Request, body: TeaserRequest):
     """
     Endpoint público para la Landing Page.
-    Cortado a 500 caracteres, solo con RAG (sin Perplexity) y protegido por ID de Navegador.
+    Genera una respuesta idéntica a la de la app (Perplexity + RAG + Respuesta completa).
+    Protegido por ID de Navegador (Max 3 al día) para evitar abusos de consumo.
     """
     country_code = request.headers.get('X-Country-Code', 'General')
     
@@ -617,7 +618,7 @@ async def teaser_chat_stream_handler(request: Request, body: TeaserRequest):
         doc = await limit_doc_ref.get()
         if doc.exists:
             count = doc.to_dict().get('count', 0)
-            if count >= 3:  # 👈 LÍMITE: 3 pruebas gratis por navegador al día
+            if count >= 3:  # 👈 LÍMITE: 3 pruebas completas por navegador al día
                 raise HTTPException(status_code=429, detail="Has alcanzado el límite de demostraciones gratuitas por hoy.")
             await limit_doc_ref.update({'count': firestore.Increment(1)})
         else:
@@ -626,41 +627,62 @@ async def teaser_chat_stream_handler(request: Request, body: TeaserRequest):
         raise he
     except Exception as e:
         log.error(f"Error verificando límite de Teaser para {anon_id}: {e}")
-        # Si falla Firebase, permitimos pasar por seguridad
     
     async def restricted_stream_generator():
         try:
-            yield f"data: {json.dumps({'event': 'status', 'message': 'Consultando biblioteca del IIRESODH...'})}\n\n"
+            # 3. BÚSQUEDA 100% REAL EN PARALELO (RAG + PERPLEXITY)
+            yield f"data: {json.dumps({'event': 'status', 'message': 'Analizando fuentes y biblioteca privada...'})}\n\n"
             
-            # 3. BÚSQUEDA SOLO EN RAG (Sin Perplexity)
-            rag_context = await rag_client.search_internal_documents(body.prompt)
+            search_query = body.prompt
             
-            yield f"data: {json.dumps({'event': 'status', 'message': 'Redactando fundamento jurídico...'})}\n\n"
+            rag_task = rag_client.search_internal_documents(search_query)
+            perp_task = perplexity_client.get_perplexity_research(search_query)
             
-            prompt_teaser = f"""
-            Escribe una introducción jurídica muy profesional y fundamentada para la siguiente consulta utilizando el conocimiento proporcionado.
+            rag_context, web_context = await asyncio.gather(rag_task, perp_task)
             
-            Contexto: {rag_context}
-            Consulta: {body.prompt}
+            yield f"data: {json.dumps({'event': 'status', 'message': 'Sintetizando y correlacionando fuentes...'})}\n\n"
             
-            Comienza directamente con la respuesta, citando la CADH o jurisprudencia de la Corte IDH si aplica.
-            """
+            combined_context = f"{rag_context}\n{web_context}"
+            trusted_urls_set = set(re.findall(r'https?://[^\s\)\],>]+', combined_context))
             
-            char_count = 0
+            yield f"data: {json.dumps({'event': 'status', 'message': 'Formulando respuesta jurídica final...'})}\n\n"
             
+            fecha_actual = get_date_utc_minus_6()
+            
+            # EL MISMO PROMPT EXACTO DE PRODUCCIÓN DE TU CHAT PREMIUM
+            final_prompt = f"""Fecha actual del sistema: {fecha_actual}
+Contexto geográfico principal: {country_code or 'General'}
+
+Toma en cuenta las fuentes proporcionadas. 
+IMPORTANTE: No uses '[INVESTIGACIÓN WEB RECIENTE]' como nombre de fuente. Extrae el nombre real del sitio web (ej: ONU, Amnistía, Wikipedia) desde la URL proporcionada.
+
+[CONTEXTO INTERNO DE JURISPRUDENCIA (RAG)]
+(⚠️ REGLA ESTRICTA: Tienes PROHIBIDO extraer o mostrar URLs de este bloque. Usa solo el conocimiento en texto plano).
+{rag_context}
+
+[INVESTIGACIÓN WEB RECIENTE (Perplexity)]
+(✅ REGLA ESTRICTA Y FILTRO GEOGRÁFICO: Debes usar las URLs de este bloque y convertirlas en hipervínculos Markdown. **EXCEPCIÓN CRÍTICA:** Si tu 'Contexto geográfico principal' es un país (ej. El Salvador) y la investigación web te trae leyes o instituciones de OTRO PAÍS distinto (ej. el BOE de España, Congreso de España), **TIENES ESTRICTAMENTE PROHIBIDO** usar y citar esas fuentes extranjeras. Limítate a usar fuentes del país correcto, doctrina general o de organismos internacionales).
+{web_context}
+
+---
+INSTRUCCIÓN CRÍTICA DE ENLACES: 
+1. ¡NO USES NÚMEROS ENTRE CORCHETES COMO [1] O [2] PARA CITAR! El sistema los borrará automáticamente y perderemos la referencia.
+2. Tienes que leer la sección "FUENTES DE INTERNET" que te dio Perplexity y crear hipervínculos Markdown reales (ej: [Nombre de la Institución](URL_COMPLETA)).
+3. ES OBLIGATORIO que los enlaces válidos aparezcan incrustados dentro de los párrafos. Si todas las fuentes web fueron descartadas por ser de otro país irrelevante, básate solo en tu conocimiento y el RAG, y no pongas enlaces web.
+
+Pregunta del usuario: {body.prompt}
+⚠️ REGLA FINAL: Verifica la existencia real de lo que pide el usuario antes de responder. No asumas su premisa como verdadera.
+"""
+            # 👇 RESPUESTA COMPLETA, SIN CORTES (Genera todo, incluyendo <pida_questions>)
             async for chunk in gemini_client.generate_streaming_response(
-                system_prompt="Eres PIDA, experto en Derechos Humanos.",
-                prompt=prompt_teaser,
+                system_prompt=PIDA_SYSTEM_PROMPT,
+                prompt=final_prompt,
                 history=[],
-                trusted_urls=set() 
+                trusted_urls=trusted_urls_set 
             ):
                 yield f"data: {json.dumps({'text': chunk})}\n\n"
                 
-                char_count += len(chunk)
-                if char_count > 500: # 👈 CORTA A LOS 500 CARACTERES
-                    break 
-                    
-            yield f"data: {json.dumps({'event': 'blur_ready'})}\n\n"
+            yield f"data: {json.dumps({'event': 'done'})}\n\n"
             
         except Exception as e:
             log.error(f"Error en teaser chat: {e}", exc_info=True)
@@ -669,7 +691,8 @@ async def teaser_chat_stream_handler(request: Request, body: TeaserRequest):
     headers = { 
         "Content-Type": "text/event-stream", 
         "Cache-Control": "no-cache", 
-        "Connection": "keep-alive" 
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no"
     }
     return StreamingResponse(restricted_stream_generator(), headers=headers)
 
