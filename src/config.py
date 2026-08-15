@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     # --- VARIABLES DE LÍMITES DE CHAT (NUEVO) ---
     # Estos valores actúan como "default". Si en Cloud Run defines la variable de entorno,
     # Pydantic tomará el valor de Cloud Run automáticamente.
+    LIMIT_FREEMIUM_CHAT_MONTHLY: int = 5    # Límite para usuarios sin tarjeta
     LIMIT_BASICO_CHAT_MONTHLY: int = 150    # Antes DAILY: 5
     LIMIT_AVANZADO_CHAT_MONTHLY: int = 600  # Antes DAILY: 20
     LIMIT_PREMIUM_CHAT_MONTHLY: int = 3000  # Antes DAILY: 100
