@@ -594,21 +594,44 @@ Pregunta del usuario: {chat_request.prompt}
 def read_status():
     return {"status": "ok", "message": "PIDA Chat Backend v3.0 (Security Patched)"}
 
-# 👇 NUEVO ENDPOINT PARA EL LEAD MAGNET (TRY-BEFORE-YOU-BUY)
+# 👇 ENDPOINT PARA EL LEAD MAGNET (TRY-BEFORE-YOU-BUY) BLINDADO POR ANON-ID
 @app.post("/teaser-chat", tags=["Lead Magnet"])
 async def teaser_chat_stream_handler(request: Request, body: TeaserRequest):
     """
     Endpoint público para la Landing Page.
-    Responde a la consulta pero corta el stream a los 400 caracteres para obligar al registro
-    y proteger los costos de API. No requiere autenticación.
+    Cortado a 400 caracteres y protegido por ID de Navegador (Max 3 al día).
     """
     country_code = request.headers.get('X-Country-Code', 'General')
+    
+    # 1. OBTENER EL SELLO DEL NAVEGADOR EN LUGAR DE LA IP
+    anon_id = request.headers.get("X-Anon-ID")
+    
+    if not anon_id:
+        raise HTTPException(status_code=400, detail="Falta identificador de dispositivo.")
+    
+    # 2. VALIDAR LÍMITES EN FIRESTORE POR NAVEGADOR
+    today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    limit_doc_ref = db.collection('teaser_limits').document(f"{anon_id}_{today_str}")
+    
+    try:
+        doc = await limit_doc_ref.get()
+        if doc.exists:
+            count = doc.to_dict().get('count', 0)
+            if count >= 3:  # 👈 LÍMITE: 3 pruebas gratis por navegador al día
+                raise HTTPException(status_code=429, detail="Has alcanzado el límite de demostraciones gratuitas por hoy.")
+            await limit_doc_ref.update({'count': firestore.Increment(1)})
+        else:
+            await limit_doc_ref.set({'count': 1})
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        log.error(f"Error verificando límite de Teaser para {anon_id}: {e}")
+        # Si falla Firebase, permitimos pasar por seguridad
     
     async def restricted_stream_generator():
         try:
             yield f"data: {json.dumps({'event': 'status', 'message': 'Consultando biblioteca del IIRESODH...'})}\n\n"
             
-            # 1. Búsqueda rápida en el RAG
             rag_context = await rag_client.search_internal_documents(body.prompt)
             
             yield f"data: {json.dumps({'event': 'status', 'message': 'Redactando fundamento jurídico...'})}\n\n"
@@ -623,7 +646,6 @@ async def teaser_chat_stream_handler(request: Request, body: TeaserRequest):
             
             char_count = 0
             
-            # Usamos el cliente base para generar la respuesta rápida
             async for chunk in gemini_client.generate_streaming_response(
                 system_prompt="Eres PIDA, experto en Derechos Humanos.",
                 prompt=prompt_teaser,
@@ -633,11 +655,9 @@ async def teaser_chat_stream_handler(request: Request, body: TeaserRequest):
                 yield f"data: {json.dumps({'text': chunk})}\n\n"
                 
                 char_count += len(chunk)
-                # EL TRUCO: Cortamos a los 400 caracteres para obligar al registro
-                if char_count > 400:
+                if char_count > 500: # 👈 CORTA A LOS 500 CARACTERES
                     break 
                     
-            # Señal para que el frontend sepa que debe poner el Blur
             yield f"data: {json.dumps({'event': 'blur_ready'})}\n\n"
             
         except Exception as e:
