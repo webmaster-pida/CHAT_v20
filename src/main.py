@@ -600,7 +600,7 @@ async def teaser_chat_stream_handler(request: Request, body: TeaserRequest):
     """
     Endpoint público para la Landing Page.
     Genera una respuesta idéntica a la de la app (Perplexity + RAG + Respuesta completa).
-    Protegido por ID de Navegador (Max 3 al día) para evitar abusos de consumo.
+    Protegido por ID de Navegador (Max 2 al día) para evitar abusos de consumo.
     """
     country_code = request.headers.get('X-Country-Code', 'General')
     
@@ -618,7 +618,7 @@ async def teaser_chat_stream_handler(request: Request, body: TeaserRequest):
         doc = await limit_doc_ref.get()
         if doc.exists:
             count = doc.to_dict().get('count', 0)
-            if count >= 3:  # 👈 LÍMITE: 3 pruebas completas por navegador al día
+            if count >= 2:  # 👈 LÍMITE: 2 pruebas completas por navegador al día
                 raise HTTPException(status_code=429, detail="Has alcanzado el límite de demostraciones gratuitas por hoy.")
             await limit_doc_ref.update({'count': firestore.Increment(1)})
         else:
