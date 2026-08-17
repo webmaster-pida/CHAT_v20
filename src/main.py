@@ -29,6 +29,7 @@ from src.core.security import get_current_user
 
 from google.cloud import firestore
 from google import genai
+from google.genai import types
 
 # Inicializar cliente global para utilidades dentro de main.py
 genai_client = genai.Client(vertexai=True, project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_LOCATION)
@@ -510,7 +511,14 @@ Respuesta (sin comillas, sin explicaciones):"""
                 
                 response = await genai_client.aio.models.generate_content(
                     model="gemini-2.5-flash",
-                    contents=reformulation_prompt
+                    contents=reformulation_prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.0,
+                        max_output_tokens=20,
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                            disable=True
+                        )
+                    )
                 )
                 
                 if response.text:
