@@ -45,19 +45,19 @@ class TeaserRequest(BaseModel):
 
 # MAPA DE TRADUCCIÓN: ID de Stripe -> Nombre del Plan interno para que no se equivoque
 STRIPE_PRICE_MAP = {
-    # BÁSICO
+    # BÁSICO (Añadir aquí IDs de Básico Anual / MXN si existen)
     "price_1SqFQiGgaloBN5L8U60ywohe": "basico", 
     "price_1SqFSFGgaloBN5L8kxegWZqC": "basico", 
     "price_1SqFSFGgaloBN5L8BMBeRPqb": "basico", 
     "price_1SqFSyGgaloBN5L8rrwrtUau": "basico", 
     
-    # AVANZADO
+    # AVANZADO (Añadir aquí IDs de Avanzado Anual / MXN si existen)
     "price_1SqFUvGgaloBN5L8xOBssn6E": "avanzado",
     "price_1SqFWJGgaloBN5L8VKhkzLRH": "avanzado",
     "price_1SqFWJGgaloBN5L8roECNay2": "avanzado",
     "price_1SqFWJGgaloBN5L8hKpEvd1v": "avanzado",
 
-    # PREMIUM
+    # PREMIUM (Añadir aquí IDs de Premium Anual / MXN si existen)
     "price_1SqFXIGgaloBN5L8vaGyleDT": "premium",
     "price_1SqFadGgaloBN5L86iwNYm1c": "premium",
     "price_1SqFadGgaloBN5L8AwTUeTSd": "premium",
@@ -923,8 +923,8 @@ async def validate_promo_code(request: Request):
             raise HTTPException(status_code=400, detail="Faltan datos requeridos.")
 
         current_plan_name = STRIPE_PRICE_MAP.get(price_id)
-        if not current_plan_name:
-             raise HTTPException(status_code=400, detail="El plan seleccionado no es válido en el sistema.")
+        # Se elimina la restricción inicial para no rechazar precios válidos no mapeados (ej. Anuales o MXN nuevos)
+        # Esto garantiza la compatibilidad con cupones globales. Bloquearemos más adelante solo si el cupón tiene restricciones de plan.
 
         try:
             promos = stripe.PromotionCode.list(code=promo_code, active=True, limit=1)
@@ -946,19 +946,33 @@ async def validate_promo_code(request: Request):
         if not promo_coupon:
             raise HTTPException(status_code=404, detail="No se encontró un cupón asociado a esta promoción.")
 
-        coupon_id = promo_coupon.id if hasattr(promo_coupon, 'id') else promo_coupon
+        if isinstance(promo_coupon, str):
+            coupon_id = promo_coupon
+        elif hasattr(promo_coupon, 'id'):
+            coupon_id = promo_coupon.id
+        elif isinstance(promo_coupon, dict):
+            coupon_id = promo_coupon.get('id')
+        else:
+            coupon_id = str(promo_coupon)
 
         try:
             coupon = stripe.Coupon.retrieve(coupon_id)
             price_obj = stripe.Price.retrieve(price_id)
         except stripe.error.StripeError as e:
-            log.error(f"StripeError al recuperar cupón/precio: {e.user_message}")
-            raise HTTPException(status_code=400, detail="Error obteniendo los detalles del cupón desde Stripe.")
+            error_msg = e.user_message or str(e)
+            log.error(f"StripeError al recuperar cupón '{coupon_id}' o precio '{price_id}': {error_msg}")
+            raise HTTPException(status_code=400, detail=f"No se pudo validar el cupón en Stripe: {error_msg}")
 
         if hasattr(coupon, 'metadata') and coupon.metadata and "allowed_plans" in coupon.metadata:
             allowed_plans_meta = coupon.metadata["allowed_plans"]
             allowed_list = [p.strip().lower() for p in allowed_plans_meta.split(",")]
             
+            if not current_plan_name:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="No se pudo determinar el plan para este precio. Asegúrate de añadir este ID a STRIPE_PRICE_MAP para usar cupones específicos."
+                )
+
             if current_plan_name not in allowed_list:
                 raise HTTPException(
                     status_code=400, 
