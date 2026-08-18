@@ -1026,11 +1026,12 @@ async def create_payment_intent(data: Dict[str, Any], current_user: Dict[str, An
     is_admin = (email_domain in settings.ADMIN_DOMAINS) or (user_email in settings.ADMIN_EMAILS)
     
     # 2. BLINDAJE DE STRIPE: Impedir intenciones de cobro a correos no verificados, a menos que sean admin
-    if not current_user.get("email_verified", False) and not is_admin:
-        raise HTTPException(
-            status_code=403, 
-            detail="Operación denegada. Debes verificar tu correo electrónico antes de adquirir un plan."
-        )
+    # (Comentado temporalmente para permitir creación de suscripciones sin verificar email)
+    # if not current_user.get("email_verified", False) and not is_admin:
+    #     raise HTTPException(
+    #         status_code=403, 
+    #         detail="Operación denegada. Debes verificar tu correo electrónico antes de adquirir un plan."
+    #     )
 
     try:
         user_email = current_user.get("email")
